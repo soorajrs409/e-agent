@@ -1,126 +1,156 @@
 # Architecture
 
-This document is a concise, engineering-focused reference for how the agent is structured and how requests flow through the system.
+This document describes the current two-process architecture:
 
-## System Components
+- Process 1: CLI Agent (LLM orchestration)
+- Process 2: Tool Server (HTTP tool execution)
+
+## High-Level Topology
 
 ```mermaid
 flowchart LR
-    U[User / Terminal] --> M[main.py\nCLI loop + logging]
-    M --> C[agent/core.py\nLLM stream + tool dispatch]
-    C --> O[Ollama Client\nlocal model endpoint]
-    C --> G[agent/guardrails.py\ninput/tool/output checks]
-    C --> T[agent/tools.py\nread_file/call_api/run_nmap]
-    M --> L[(logs/agent.log)]
+    U[User Terminal] --> MAIN[main.py]
+    MAIN --> CORE[agent/core.py]
+    CORE --> GUARD[agent/guardrails.py]
+    CORE --> OLLAMA[Ollama Chat API]
+    CORE --> MCPCLIENT[agent/mcp_client.py]
+    MCPCLIENT --> MCPSERVER[FastAPI Tool Server]
+    MCPSERVER --> TOOL1[read_file]
+    MCPSERVER --> TOOL2[call_api]
+    MCPSERVER --> TOOL3[run_nmap logic]
+    MAIN --> LOG[(logs/agent.log)]
 ```
 
-## End-to-End Request Flow
+## Request Lifecycle
 
 ```mermaid
 sequenceDiagram
     participant User
     participant Main as main.py
-    participant Guard as guardrails.py
-    participant Core as core.py
-    participant Ollama as Ollama Model
-    participant Tools as tools.py
+    participant Core as agent/core.py
+    participant Guard as agent/guardrails.py
+    participant LLM as Ollama
+    participant MCP as agent/mcp_client.py
+    participant Server as tool server
 
-    User->>Main: Enter prompt
-    Main->>Main: log_event("USER", input)
-    Main->>Core: agent_stream_chat(input)
-    Core->>Guard: validate_user_input(input)
+    User->>Main: prompt
+    Main->>Main: log USER entry
+    Main->>Core: agent_stream_chat(prompt)
+    Core->>Guard: validate_user_input
 
-    alt Input blocked
-        Guard-->>Core: (False, reason)
-        Core-->>User: print guard block message
-    else Input allowed
-        Guard-->>Core: (True, "")
-        Core->>Ollama: chat(stream=True)
-        Ollama-->>Core: streamed chunks
-        Core-->>User: print streamed content
+    alt blocked
+        Guard-->>Core: False + reason
+        Core-->>User: guard block message
+    else allowed
+        Guard-->>Core: True
+        Core->>LLM: chat(stream=True)
+        LLM-->>Core: streamed chunks
+        Core-->>User: print streamed response
 
-        Core->>Core: json.loads(full_response)
-        alt Valid tool JSON with "tool"
-            Core->>Guard: validate_tool_call(tool,args)
-            alt Tool blocked
-                Guard-->>Core: (False, reason)
-                Core-->>User: print guard block message
-            else Tool allowed
-                Guard-->>Core: (True, "")
-                Core->>Tools: execute_tool(tool,args)
-                Tools-->>Core: tool result
-                Core->>Guard: filter_output(result)
-                Guard-->>Core: safe result
+        Core->>Core: parse full response as JSON
+        alt tool call present
+            Core->>Guard: validate_tool_call
+            alt blocked tool request
+                Guard-->>Core: False + reason
+                Core-->>User: guard block message
+            else allowed
+                Core->>MCP: POST /tools/{tool}
+                MCP->>Server: HTTP request with args
+                Server-->>MCP: {output|error}
+                MCP-->>Core: JSON response
+                Core->>Guard: filter_output(output)
                 Core-->>User: print tool result
             end
-        else Not JSON / no tool
-            Core-->>User: already printed natural response
+        else no tool JSON
+            Core-->>User: done
         end
     end
 ```
 
-## Core Decision Logic
+## Agent Internal Flow
 
 ```mermaid
 flowchart TD
-    A[Start agent_stream_chat] --> B{validate_user_input}
-    B -- fail --> C[Print guard reason and return]
-    B -- pass --> D[Send chat request with stream=True]
-    D --> E[Accumulate and print full_response]
+    A[User input] --> B{Input valid?}
+    B -- no --> C[Print guard message and stop]
+    B -- yes --> D[Send to Ollama with system prompt]
+    D --> E[Stream and accumulate full response]
     E --> F{JSON parse succeeds?}
-    F -- no --> G[Return - response treated as normal text]
+    F -- no --> G[Return plain model answer]
     F -- yes --> H{Tool key present?}
     H -- no --> G
-    H -- yes --> I[validate_tool_call]
-    I -- fail --> J[Print guard reason and return]
-    I -- pass --> K[execute_tool]
-    K --> L[filter_output]
-    L --> M[Print safe tool result]
+    H -- yes --> I{Tool call allowed?}
+    I -- no --> J[Print block message]
+    I -- yes --> K[call_tool via MCP client]
+    K --> L{Server error?}
+    L -- yes --> M[Print tool error]
+    L -- no --> N[Filter output and print]
 ```
 
-## Guardrail Pipeline
+## Deployment Boundary
 
 ```mermaid
 flowchart LR
-    In[User Input] --> V1{Injection/Length checks}
-    V1 -- blocked --> B1[Stop + reason]
-    V1 -- pass --> LLM[Model response]
-    LLM --> P{Parsed tool call?}
-    P -- no --> OUT[Normal output]
-    P -- yes --> V2{Tool-specific checks}
-    V2 -- blocked --> B2[Stop + reason]
-    V2 -- pass --> TOOL[Execute tool]
-    TOOL --> V3{Sensitive output check}
-    V3 -- match --> F[Filtered placeholder]
-    V3 -- no match --> OUT
+    subgraph Agent_Runtime[Agent Runtime]
+      MAIN[main.py]
+      CORE[agent/core.py]
+      GUARD[guardrails]
+      MCPCLIENT[mcp_client]
+    end
+
+    subgraph Tool_Runtime[Tool Server Runtime]
+      API[FastAPI app]
+      RF[read_file endpoint]
+      CA[call_api endpoint]
+      NM[run_nmap function]
+    end
+
+    CORE --> MCPCLIENT
+    MCPCLIENT --> API
+    API --> RF
+    API --> CA
+    API --> NM
 ```
+
+## Current Interface Contracts
+
+### LLM to Agent
+
+Expected tool call payload:
+
+```json
+{
+  "tool": "<tool_name>",
+  "args": { "key": "value" }
+}
+```
+
+### Agent to Tool Server
+
+- `POST /tools/<tool_name>`
+- Body: `args` object
+- Response: `{ "output": ... }` or `{ "error": ... }`
 
 ## Module Map
 
 - `main.py`
-  - CLI loop
-  - user input logging
-  - invokes `agent_stream_chat`
+  - input loop
+  - user logging
+  - calls `agent_stream_chat`
 - `agent/core.py`
-  - LLM request and stream handling
-  - tool-call JSON parsing
-  - tool dispatch and output filtering
+  - guard checks
+  - LLM streaming
+  - tool JSON parsing and dispatch
+- `agent/mcp_client.py`
+  - HTTP bridge to MCP server
 - `agent/guardrails.py`
-  - `validate_user_input`
-  - `validate_tool_call`
-  - `filter_output`
-- `agent/tools.py`
-  - `read_file`
-  - `call_api`
-  - `run_nmap`
-- `agent/prompt.py`
-  - system behavior and tool-calling instruction prompt
-- `agent/config.py`
-  - model/host/name/log configuration
+  - input policy, tool-call policy, output filtering
+- `tool-servers/core_server/server.py`
+  - FastAPI tool endpoints and execution logic
 
-## Known Architectural Constraints
+## Known Architectural Gaps
 
-- Tool invocation depends on full-response JSON parse success.
-- No multi-turn context persistence in `messages`.
-- User prompts are logged; assistant/tool metadata is not yet logged.
-- Prompt and code allowed options for `run_nmap` are slightly misaligned.
+1. `run_nmap` route is not currently exposed as `POST /tools/run_nmap`.
+2. Option validation error in `run_nmap` references undefined variable `e`.
+3. JSON parse path in `agent/core.py` uses broad `except`, masking parsing failures.
+

@@ -138,9 +138,9 @@ flowchart TD
     B -- fail --> C[Print guard reason and return]
     B -- pass --> D[Send chat request with stream=True]
     D --> E[Accumulate and print full_response]
-    E --> F{json.loads(full_response) succeeds?}
+    E --> F{JSON parse succeeds?}
     F -- no --> G[Return - response treated as normal text]
-    F -- yes --> H{"tool" key present?}
+    F -- yes --> H{Tool key present?}
     H -- no --> G
     H -- yes --> I[validate_tool_call]
     I -- fail --> J[Print guard reason and return]

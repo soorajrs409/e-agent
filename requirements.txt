@@ -1,2 +1,5 @@
 ollama
 requests
+fastapi
+pydantic
+uvicorn

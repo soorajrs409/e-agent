@@ -1,7 +1,6 @@
 from ollama import Client
-from agent.prompt import SYSTEM_PROMT
+from agent.prompt import SYSTEM_PROMPT
 from agent.config import MODEL_NAME, OLLAMA_HOST
-from agent.tools import read_file, call_api, run_nmap
 import json
 from agent.guardrails import (
     validate_user_input,
@@ -9,21 +8,11 @@ from agent.guardrails import (
     filter_output
 )
 
+from agent.mcp_client import call_tool
+
 
 client = Client(host=OLLAMA_HOST)
 
-def execute_tool(tool_name, args):
-    if tool_name == "read_file":
-        return read_file(**args)
-    
-    elif tool_name == "call_api":
-        return call_api(**args)
-    
-    elif tool_name == "run_nmap":
-        return run_nmap(**args)
-
-    else:
-        return "[-] Unknown Tool"
 
 def agent_stream_chat(user_input: str) -> str:
 
@@ -34,7 +23,7 @@ def agent_stream_chat(user_input: str) -> str:
         return
     
     messages = [
-        {"role": "system", "content": SYSTEM_PROMT},
+        {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_input}
     ]
 
@@ -66,11 +55,17 @@ def agent_stream_chat(user_input: str) -> str:
                 print(f"[-] [GUARD] {reason}")
                 return
 
-            result = execute_tool(tool_call["tool"], tool_call.get("args", {}))
-            print(f"[+] TOOL RESULT")
+            resp = call_tool(tool_call["tool"], tool_call.get("args", {}))
 
-            safe_result = filter_output(result)
-            print(safe_result)
+            if "error" in resp:
+                print(f"[-] Tool error: {resp['error']}")
+
+            else:
+
+                print(f"[+] TOOL RESULT")
+
+                safe_result = filter_output(resp["output"])
+                print(safe_result)
 
     except:
         pass

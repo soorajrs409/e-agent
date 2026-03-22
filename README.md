@@ -9,7 +9,7 @@ This project is split into two runtimes:
 - The CLI agent handles prompting, guardrails, tool-call detection, and output display.
 - The tool server exposes a small HTTP tool surface for file reads, HTTP fetches, and `nmap` scans.
 
-The current codebase also builds the system prompt dynamically by discovering tools from the running tool server and converting them into a YAML tool section.
+The current codebase builds the system prompt dynamically by discovering tools from the running tool server and converting them into a YAML tool section. The prompt is initialized lazily and can refresh tool metadata if discovery was unavailable earlier in the session.
 
 ## Architecture At A Glance
 
@@ -53,23 +53,25 @@ More detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 1. `main.py` starts the CLI loop and logs user input to `logs/agent.log`.
 2. `agent/core.py` validates the input with `validate_user_input`.
-3. At import time, `agent/core.py` calls `discover_tools()` and builds a system prompt from:
+3. When handling a request, `agent/core.py` obtains the active system prompt from:
    - `agent/base_prompt.py`
    - `agent/prompt_builder.py`
    - the `/tools` response from the tool server
-4. The agent sends the system prompt plus user message to Ollama using streaming.
-5. The full model response is buffered, then scanned for a JSON object.
-6. If the JSON contains a `tool` key, the agent validates the tool call and sends it to the tool server.
-7. The tool server returns either `{ "output": ... }` or `{ "error": ... }`.
-8. The agent filters tool output for sensitive phrases and prints the result.
-9. If no valid tool JSON is found, the buffered model response is printed as normal chat output.
+4. If no prompt has been built yet, or if the cached tool list is empty, the agent refreshes tool discovery and rebuilds the prompt.
+5. The agent sends the system prompt plus user message to Ollama using streaming.
+6. The full model response is buffered, then scanned for a valid JSON object containing a `tool` key.
+7. If the JSON contains a `tool` key, the agent validates the tool call and sends it to the tool server.
+8. `call_tool()` tries each configured MCP server until it receives a valid success payload.
+9. The tool server returns either `{ "output": ... }` or `{ "error": ... }`.
+10. The agent filters tool output for sensitive phrases and prints the result.
+11. If no valid tool JSON is found, the buffered model response is printed as normal chat output.
 
 ## Components
 
 ### CLI and Agent
 
 - `main.py`: CLI loop, prompt display, user input logging
-- `agent/core.py`: prompt assembly, Ollama chat, tool-call parsing, tool dispatch
+- `agent/core.py`: prompt assembly, prompt refresh, Ollama chat, tool-call parsing, tool dispatch
 - `agent/base_prompt.py`: base system instructions for normal replies vs tool calls
 - `agent/prompt_builder.py`: converts discovered tools into YAML for the prompt
 - `agent/mcp_client.py`: tool discovery and tool execution over HTTP
@@ -93,8 +95,9 @@ The agent no longer relies on a hardcoded tool list at runtime. Instead:
 - discovered tools are cached in `TOOLS_CACHE`
 - `build_tools_section()` renders the discovered tools into YAML
 - the YAML is appended to `BASE_SYSTEM_PROMPT`
+- `get_system_prompt()` rebuilds the prompt if it has not been initialized yet or if cached discovery is empty
 
-Important consequence: start the tool server before starting `python main.py`. The prompt is built when `agent/core.py` is imported, so if the server is down at startup, the session can begin without tool metadata in its prompt.
+Important consequence: starting the tool server before `python main.py` is still the best path, but the agent can now recover by refreshing tool discovery when a request is handled.
 
 ## Setup
 
@@ -165,6 +168,8 @@ Agent-to-server contract:
 - request body: the `args` object
 - response: `{ "output": ... }` or `{ "error": ... }`
 
+If multiple MCP servers are configured, tool execution now skips servers that return transport errors, HTTP errors, empty responses, invalid JSON, or JSON error payloads, and continues trying the next server.
+
 ## Guardrails
 
 ### Input guardrails
@@ -190,16 +195,18 @@ Agent-to-server contract:
 
 - `call_tool()` iterates through every configured MCP server until one succeeds.
 - `discover_tools()` caches results for the lifetime of the process.
+- `discover_tools(force_refresh=True)` can refresh the cache when prompt rebuilds are needed.
 - The agent buffers the entire Ollama response before printing anything, even though chat is requested with `stream=True`.
-- `agent/prompt.py` still exists in the repo, but the active runtime prompt path uses `BASE_SYSTEM_PROMPT` plus the dynamically built tools section.
+- `extract_tool_call()` now uses JSON decoding from each `{` position instead of a greedy regex search.
+- the CLI and Ollama call paths now fail gracefully instead of terminating the session on uncaught exceptions.
 
 ## Current Limitations
 
-1. `agent/core.py` imports `SYSTEM_PROMPT` from `agent/prompt.py`, but the active prompt path uses `build_system_prompt()` instead.
-2. Tool-call detection uses a broad regex plus `json.loads`, so malformed mixed-output responses can fail quietly and fall back to plain output.
-3. Tool discovery happens once per process and is cached, so newly added tools are not picked up until the agent restarts.
-4. Only user inputs are logged today; assistant responses and tool traces are not persisted.
-5. `call_api` is a simple HTTP GET proxy and has no auth, header control, or response-size limits.
+1. Tool discovery is cached, so newly added tools on a healthy running server are not picked up until a refresh path runs or the agent restarts.
+2. The Ollama response is still fully buffered before display, even though upstream streaming is enabled.
+3. Only user inputs are logged today; assistant responses and tool traces are not persisted.
+4. `call_api` is a simple HTTP GET proxy and has no auth, header control, or response-size limits.
+5. `agent/prompt.py` still exists in the repo as an older prompt definition, but the active runtime path uses `BASE_SYSTEM_PROMPT` plus the dynamically built tools section.
 
 ## Additional Docs
 

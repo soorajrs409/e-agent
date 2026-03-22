@@ -1,7 +1,7 @@
 from ollama import Client
-from agent.prompt import SYSTEM_PROMPT
 from agent.config import MODEL_NAME, OLLAMA_HOST
 import json
+from json import JSONDecodeError
 
 from agent.guardrails import (
     validate_user_input,
@@ -12,19 +12,51 @@ from agent.guardrails import (
 from agent.mcp_client import call_tool, discover_tools
 from agent.prompt_builder import build_tools_section
 from agent.base_prompt import BASE_SYSTEM_PROMPT
-import re
 
 
 client = Client(host=OLLAMA_HOST)
 
 
-def build_system_prompt():
-    tools = discover_tools()
+system_prompt = None
+
+
+def build_system_prompt(force_refresh: bool = False):
+    tools = discover_tools(force_refresh=force_refresh)
     tools_section = build_tools_section(tools)
     return BASE_SYSTEM_PROMPT + "\n\n" + tools_section
 
 
-system_prompt = build_system_prompt()
+def get_system_prompt():
+    global system_prompt
+
+    if system_prompt is None:
+        system_prompt = build_system_prompt(force_refresh=True)
+        return system_prompt
+
+    tools = discover_tools()
+    if not tools:
+        system_prompt = build_system_prompt(force_refresh=True)
+
+    return system_prompt
+
+
+def extract_tool_call(text: str):
+    decoder = json.JSONDecoder()
+
+    for start in (i for i, char in enumerate(text) if char == "{"):
+        try:
+            parsed, end = decoder.raw_decode(text[start:])
+        except JSONDecodeError:
+            continue
+
+        trailing_text = text[start + end:].strip()
+        if trailing_text and not trailing_text.startswith("```"):
+            continue
+
+        if isinstance(parsed, dict) and "tool" in parsed:
+            return parsed
+
+    return None
 
 
 def agent_stream_chat(user_input: str):
@@ -35,15 +67,19 @@ def agent_stream_chat(user_input: str):
         return
 
     messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": get_system_prompt()},
         {"role": "user", "content": user_input}
     ]
 
-    stream = client.chat(
-        model=MODEL_NAME,
-        messages=messages,
-        stream=True
-    )
+    try:
+        stream = client.chat(
+            model=MODEL_NAME,
+            messages=messages,
+            stream=True
+        )
+    except Exception as e:
+        print(f"[-] [OLLAMA ERROR] {e}")
+        return
 
     full_response = ""
 
@@ -55,19 +91,8 @@ def agent_stream_chat(user_input: str):
     clean = full_response.strip()
 
     # 🔹 Step 2: Detect tool call safely
-    tool_call = None
-    is_tool = False
-
-    match = re.search(r"\{.*\}", clean, re.DOTALL)
-
-    if match:
-        try:
-            parsed = json.loads(match.group())
-            if isinstance(parsed, dict) and "tool" in parsed:
-                tool_call = parsed
-                is_tool = True
-        except Exception:
-            is_tool = False
+    tool_call = extract_tool_call(clean)
+    is_tool = tool_call is not None
 
     # 🔹 Step 3: Handle Tool Execution
     if is_tool:

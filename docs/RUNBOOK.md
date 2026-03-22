@@ -22,6 +22,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+The dependency set now includes `pyyaml`, which is required for dynamic prompt tool rendering.
+
 ### 2. Start Ollama
 
 ```bash
@@ -43,12 +45,16 @@ python main.py
 
 ## Important Startup Note
 
-The agent discovers tools and builds its system prompt when `agent/core.py` is imported. Because of that:
+The cleanest startup order is still tool server first, then CLI, because the agent needs tool discovery for the best prompt on first request.
 
 - start the tool server before `python main.py`
-- if the tool server was down when the CLI started, restart the CLI after the tool server is healthy
+- then start the CLI agent
 
-Without that restart, the process can continue using an empty or stale tool list from cache.
+Current behavior is more forgiving than before:
+
+- the runtime now builds the prompt lazily
+- if cached discovery is empty, the agent can force a refresh and rebuild the prompt
+- restarting the CLI is still the safest option after tool-server outages or tool-list changes
 
 ## Quick Health Checks
 
@@ -134,14 +140,15 @@ Check these first:
 
 Why this happens:
 
-- tool discovery happens at import time
+- tool discovery may have returned an empty list earlier
 - discovered tools are cached in `TOOLS_CACHE`
-- the system prompt is built once per process
+- the prompt may need a refresh or process restart to pick up newly added tools
 
 ### `Connection refused` to Ollama
 
 - confirm `ollama serve` is running
 - verify `agent/config.py` points to `http://127.0.0.1:11434`
+- current CLI behavior should print `[-] [OLLAMA ERROR] ...` instead of crashing the session
 
 ### `Connection refused` to the tool server
 
@@ -153,12 +160,13 @@ Why this happens:
 - inspect the tool server console for request failures
 - verify the endpoint returns JSON and not an HTML error page
 - confirm local dependencies like `nmap` are installed if using `run_nmap`
+- if multiple MCP servers are configured, the client now skips failing servers and keeps trying the next one
 
 ### Tool invocation does not trigger even though the model tried
 
-- the agent looks for a JSON object in the full model response
-- mixed prose plus malformed JSON may fail parsing and fall back to normal text output
-- the current parse path swallows JSON parse errors
+- the agent scans the buffered response for decodable JSON objects containing a `tool` key
+- malformed mixed output can still fall back to normal text output
+- fenced-code or clean JSON payloads are more reliable than prose mixed with partial JSON
 
 ### `run_nmap` is rejected
 
@@ -184,6 +192,8 @@ Possible causes:
 
 - `call_tool()` tries each configured MCP server in sequence.
 - `discover_tools()` caches tool metadata for the duration of the process.
+- `discover_tools(force_refresh=True)` is used when the runtime needs to rebuild the prompt after empty discovery.
 - `call_api` performs a simple HTTP GET and returns raw text.
 - Tool output is filtered for selected sensitive phrases before display.
+- top-level CLI and Ollama errors are handled more gracefully and should not terminate the session immediately.
 - This stack is a local development prototype and should not be exposed publicly without authentication and tighter policy controls.

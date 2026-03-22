@@ -3,3 +3,4 @@ requests
 fastapi
 pydantic
 uvicorn
+pyyaml

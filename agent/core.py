@@ -2,28 +2,40 @@ from ollama import Client
 from agent.prompt import SYSTEM_PROMPT
 from agent.config import MODEL_NAME, OLLAMA_HOST
 import json
+
 from agent.guardrails import (
     validate_user_input,
     validate_tool_call,
     filter_output
 )
 
-from agent.mcp_client import call_tool
+from agent.mcp_client import call_tool, discover_tools
+from agent.prompt_builder import build_tools_section
+from agent.base_prompt import BASE_SYSTEM_PROMPT
+import re
 
 
 client = Client(host=OLLAMA_HOST)
 
 
-def agent_stream_chat(user_input: str) -> str:
+def build_system_prompt():
+    tools = discover_tools()
+    tools_section = build_tools_section(tools)
+    return BASE_SYSTEM_PROMPT + "\n\n" + tools_section
 
+
+system_prompt = build_system_prompt()
+
+
+def agent_stream_chat(user_input: str):
+    # 🔹 Step 0: Input Guard
     is_valid, reason = validate_user_input(user_input)
-
     if not is_valid:
         print(f"[-] [GUARD] {reason}")
         return
-    
+
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_input}
     ]
 
@@ -35,37 +47,61 @@ def agent_stream_chat(user_input: str) -> str:
 
     full_response = ""
 
+    # 🔹 Step 1: Capture response ONLY (no printing yet)
     for chunk in stream:
         content = chunk["message"]["content"]
         full_response += content
-        print(content, end="", flush=True)
 
-    print()
+    clean = full_response.strip()
 
-    try:
+    # 🔹 Step 2: Detect tool call safely
+    tool_call = None
+    is_tool = False
 
-        tool_call = json.loads(full_response)
+    match = re.search(r"\{.*\}", clean, re.DOTALL)
 
-        if "tool" in tool_call:
-            print("\n[+] Executing tool...\n")
+    if match:
+        try:
+            parsed = json.loads(match.group())
+            if isinstance(parsed, dict) and "tool" in parsed:
+                tool_call = parsed
+                is_tool = True
+        except Exception:
+            is_tool = False
 
-            allowed, reason = validate_tool_call(tool_call["tool"], tool_call.get("args", {}))
+    # 🔹 Step 3: Handle Tool Execution
+    if is_tool:
+        tool_name = tool_call["tool"]
+        args = tool_call.get("args", {})
 
-            if not allowed:
-                print(f"[-] [GUARD] {reason}")
-                return
+        print("\n[+] Executing tool...\n")
 
-            resp = call_tool(tool_call["tool"], tool_call.get("args", {}))
+        # 🛡️ Tool Guard
+        allowed, reason = validate_tool_call(tool_name, args)
+        if not allowed:
+            print(f"[-] [GUARD BLOCKED] {reason}")
+            return
 
-            if "error" in resp:
-                print(f"[-] Tool error: {resp['error']}")
+        # 🔌 MCP Tool Call
+        resp = call_tool(tool_name, args)
 
-            else:
+        if not isinstance(resp, dict):
+            print("[-] Invalid response from tool")
+            return
 
-                print(f"[+] TOOL RESULT")
+        if "error" in resp:
+            print(f"[-] TOOL ERROR: {resp['error']}")
+            return
 
-                safe_result = filter_output(resp["output"])
-                print(safe_result)
+        if "output" not in resp:
+            print("[-] Tool returned unexpected format")
+            print(resp)
+            return
 
-    except:
-        pass
+        print("[+] TOOL RESULT")
+        safe_result = filter_output(resp["output"])
+        print(safe_result)
+
+    # 🔹 Step 4: Normal Chat Response
+    else:
+        print(clean)

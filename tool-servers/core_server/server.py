@@ -22,11 +22,33 @@ class NmapReq(BaseModel):
 def list_tools():
     return {
         "tools": [
-            {"name": "read_file", "args": ["file_path"]},
-            {"name": "call_api", "args": ["url"]},
-            {"name": "run_nmap", "args": ["target", "options"]}
+            {
+                "name": "read_file",
+                "description": "Read file contents from disk",
+                "args": ["file_path"]
+            },
+            {
+                "name": "call_api",
+                "description": "Make HTTP GET request to a URL",
+                "args": ["url"]
+            },
+            {
+                "name": "run_nmap",
+                "description": "Run network scan to find open ports/services",
+                "args": ["target", "options"]
+            }
         ]
     }
+
+# @app.get("/tools")
+# def list_tools():
+#     return {
+#         "tools": [
+#             {"name": "read_file", "args": ["file_path"]},
+#             {"name": "call_api", "args": ["url"]},
+#             {"name": "run_nmap", "args": ["target", "options"]}
+#         ]
+#     }
 
 
 
@@ -49,7 +71,7 @@ def call_api(req: CallApiReq):
     except Exception as e:
         return {"error": str(e)}
     
-
+@app.post("/tools/run_nmap")
 def run_nmap(req: NmapReq):
     allowed_flags = ["-sV", "-sS", "-Pn", "-F", "-O"]
 
@@ -57,7 +79,7 @@ def run_nmap(req: NmapReq):
 
     for opt in option_list:
         if opt not in allowed_flags:
-            return {"error":f"Disallowed switch {e}"}
+            return {"error":f"Disallowed switch {opt}"}
         
     try:
         cmd = ["nmap"] + option_list + [req.target]

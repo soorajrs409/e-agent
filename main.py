@@ -23,7 +23,10 @@ def main():
 
         print(f"[*] {AGENT_NAME} -> ", end="", flush=True)
 
-        agent_stream_chat(user_input)
+        try:
+            agent_stream_chat(user_input)
+        except Exception as e:
+            print(f"\n[-] Runtime error: {e}")
 
          # Optional: log response later (we’ll improve this in v2)
 

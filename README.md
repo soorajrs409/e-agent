@@ -1,115 +1,133 @@
 # AI Agent Dev
 
-Local CLI AI agent powered by Ollama, with external tool execution delegated to a FastAPI-based MCP-style tool server.
+Local CLI AI agent powered by Ollama, with tool execution delegated to a FastAPI-based MCP-style server.
 
-## What Changed
+## Overview
 
-The project moved from in-process tools (`agent/tools.py`) to a client/server tool boundary:
+This project is split into two runtimes:
 
-- Agent side: `agent/mcp_client.py` calls tools over HTTP.
-- Server side: `tool-servers/core_server/server.py` exposes tool endpoints.
+- The CLI agent handles prompting, guardrails, tool-call detection, and output display.
+- The tool server exposes a small HTTP tool surface for file reads, HTTP fetches, and `nmap` scans.
 
-This separates model orchestration from tool execution and makes it easier to scale or isolate tool runtimes.
+The current codebase builds the system prompt dynamically by discovering tools from the running tool server and converting them into a YAML tool section. The prompt is initialized lazily and can rebuild itself if the initial tool discovery was empty.
 
-## Architecture At a Glance
+## Architecture At A Glance
 
 ```mermaid
 flowchart LR
-    U[User] --> CLI[main.py CLI]
+    U[User] --> CLI[main.py]
     CLI --> CORE[agent/core.py]
-    CORE --> OLLAMA[Ollama API]
     CORE --> GUARD[agent/guardrails.py]
+    CORE --> OLLAMA[Ollama API]
     CORE --> MCP[agent/mcp_client.py]
     MCP --> TS[tool-servers/core_server/server.py]
     CLI --> LOG[(logs/agent.log)]
 ```
 
-Detailed diagrams: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+More detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 ## Repository Layout
 
 ```text
 .
 ├── main.py
-├── README.md
 ├── requirements.txt
-├── agent
+├── README.md
+├── agent/
+│   ├── base_prompt.py
 │   ├── config.py
 │   ├── core.py
 │   ├── guardrails.py
 │   ├── mcp_client.py
-│   └── prompt.py
-├── tool-servers
-│   └── core_server
-│       └── server.py
-├── docs
+│   ├── prompt.py
+│   └── prompt_builder.py
+├── docs/
 │   ├── ARCHITECTURE.md
 │   └── RUNBOOK.md
-└── logs
-    └── agent.log
+└── tool-servers/
+    └── core_server/
+        └── server.py
 ```
 
-## Runtime Flow
+## Current Runtime Flow
 
-1. User enters input in CLI (`main.py`).
-2. Input is validated by `validate_user_input`.
-3. Agent sends a system + user message to Ollama with streaming enabled.
-4. Agent prints streamed model output.
-5. Agent tries to parse full output as JSON tool call.
-6. If tool JSON exists, agent validates tool call and forwards it via `mcp_client.call_tool`.
-7. Tool server executes request and returns JSON (`output` or `error`).
-8. Agent filters tool output and prints safe result.
+1. `main.py` starts the CLI loop and logs user input to `logs/agent.log`.
+2. `agent/core.py` validates the input with `validate_user_input`.
+3. When handling a request, `agent/core.py` obtains the active system prompt from:
+   - `agent/base_prompt.py`
+   - `agent/prompt_builder.py`
+   - the `/tools` response from the tool server
+4. If no prompt has been built yet, or if the cached tool list is empty, the agent refreshes tool discovery and rebuilds the prompt.
+5. The agent sends the system prompt plus user message to Ollama using streaming.
+6. The full model response is buffered, then scanned for a valid JSON object containing a `tool` key.
+7. If the JSON contains a `tool` key, the agent validates the tool call and sends it to the tool server.
+8. `call_tool()` tries each configured MCP server until it receives a valid success payload.
+9. The tool server returns either `{ "output": ... }` or `{ "error": ... }`.
+10. The agent filters tool output for sensitive phrases and prints the result.
+11. If no valid tool JSON is found, the buffered model response is printed as normal chat output.
 
 ## Components
 
-### Agent (`main.py`, `agent/*`)
+### CLI and Agent
 
-- `main.py`: CLI loop + user input logging.
-- `agent/core.py`: model streaming + tool-call parsing + tool dispatch.
-- `agent/mcp_client.py`: HTTP POST wrapper to MCP server (`http://127.0.0.1:8001`).
-- `agent/guardrails.py`: prompt-injection checks, blocked scan targets, output filtering.
-- `agent/prompt.py`: model behavior + tool-call JSON contract.
-- `agent/config.py`: model host/name and display config.
+- `main.py`: CLI loop, prompt display, user input logging
+- `agent/core.py`: prompt assembly, prompt refresh, Ollama chat, tool-call parsing, tool dispatch
+- `agent/base_prompt.py`: base system instructions for normal replies vs tool calls
+- `agent/prompt_builder.py`: converts discovered tools into YAML for the prompt
+- `agent/mcp_client.py`: tool discovery and tool execution over HTTP
+- `agent/guardrails.py`: input validation, `run_nmap` target restrictions, output filtering
+- `agent/config.py`: model host/name, agent name, log file path
 
-### Tool Server (`tool-servers/core_server/server.py`)
+### Tool Server
 
-FastAPI app exposing:
+`tool-servers/core_server/server.py` exposes:
 
-- `GET /tools`: list available tools.
-- `POST /tools/read_file`: read file contents.
-- `POST /tools/call_api`: HTTP GET proxy.
+- `GET /tools`
+- `POST /tools/read_file`
+- `POST /tools/call_api`
+- `POST /tools/run_nmap`
 
-Code also contains `run_nmap` logic, but route registration currently needs attention (see Known Issues).
+## Tool Discovery
+
+The agent no longer relies on a hardcoded tool list at runtime. Instead:
+
+- `discover_tools()` fetches `/tools` from each configured MCP server
+- discovered tools are cached in `TOOLS_CACHE`
+- `build_tools_section()` renders the discovered tools into YAML
+- the YAML is appended to `BASE_SYSTEM_PROMPT`
+- `get_system_prompt()` rebuilds the prompt if it has not been initialized yet or if cached discovery is empty
+
+Important consequence: starting the tool server before `python main.py` is still the best path. The agent can recover from an earlier empty discovery result, but it does not continuously refresh a healthy non-empty tool cache.
 
 ## Setup
 
-## 1) Create and activate environment
+### 1. Create and activate a virtual environment
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 ```
 
-## 2) Install dependencies
+### 2. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## 3) Start Ollama
+### 3. Start Ollama
 
 ```bash
 ollama serve
 ollama pull llama3
 ```
 
-## 4) Start tool server
+### 4. Start the tool server
 
 ```bash
 uvicorn server:app --app-dir tool-servers/core_server --host 127.0.0.1 --port 8001 --reload
 ```
 
-## 5) Start agent CLI
+### 5. Start the agent CLI
 
 ```bash
 python main.py
@@ -121,76 +139,76 @@ Type `exit` to quit.
 
 From `agent/config.py`:
 
-- `MODEL_NAME` (default: `llama3`)
-- `OLLAMA_HOST` (default: `http://127.0.0.1:11434`)
-- `AGENT_NAME` (default: `electron-agent`)
-- `LOG_FILE` (default: `logs/agent.log`)
+- `MODEL_NAME = "llama3"`
+- `OLLAMA_HOST = "http://127.0.0.1:11434"`
+- `AGENT_NAME = "electron-agent"`
+- `LOG_FILE = "logs/agent.log"`
 
 From `agent/mcp_client.py`:
 
-- `MCP_SERVER` (default: `http://127.0.0.1:8001`)
+- `MCP_SERVERS = ["http://127.0.0.1:8001"]`
+- `MCP_SERVER = MCP_SERVERS[0]`
 
-## Tool Call Contract
+## Tool Contract
 
-Model is expected to return JSON when a tool is needed:
+Expected model tool call:
 
 ```json
 {
   "tool": "read_file",
   "args": {
-    "file_path": "/abs/path/file.txt"
+    "file_path": "README.md"
   }
 }
 ```
 
-Agent forwards request to:
+Agent-to-server contract:
 
-- `POST /tools/<tool_name>` with body `args`.
+- request: `POST /tools/<tool_name>`
+- request body: the `args` object
+- response: `{ "output": ... }` or `{ "error": ... }`
 
-Server returns one of:
-
-```json
-{"output": "..."}
-```
-
-```json
-{"error": "..."}
-```
+If multiple MCP servers are configured, tool execution now skips servers that return transport errors, HTTP errors, empty responses, invalid JSON, or JSON error payloads, and continues trying the next server.
 
 ## Guardrails
 
-- Blocks known prompt injection phrases.
-- Rejects oversized inputs (`> 5000` chars).
-- Blocks `run_nmap` targets containing:
+### Input guardrails
+
+- blocks prompt-injection phrases such as `ignore previous instructions`
+- rejects input longer than 5000 characters
+
+### Tool guardrails
+
+- blocks `run_nmap` targets containing:
   - `127.0.0.1`
   - `localhost`
   - `169.254.169.254`
-- Filters response text containing sensitive phrases.
 
-## Logs
+### Output filtering
 
-User messages are appended to `logs/agent.log` in `main.py`.
+- filters responses containing:
+  - `system prompt`
+  - `internal policy`
+  - `hidden instructions`
 
-Current logging scope:
+## Operational Notes
 
-- user inputs are logged
-- assistant outputs and tool execution metadata are not logged yet
+- `call_tool()` iterates through every configured MCP server until one succeeds.
+- `discover_tools()` caches results for the lifetime of the process.
+- `discover_tools(force_refresh=True)` can refresh the cache when prompt rebuilds are needed.
+- The agent buffers the entire Ollama response before printing anything, even though chat is requested with `stream=True`.
+- `extract_tool_call()` now uses JSON decoding from each `{` position instead of a greedy regex search.
+- the CLI and Ollama call paths now fail gracefully instead of terminating the session on uncaught exceptions.
 
-## Known Issues (Current Code)
+## Current Limitations
 
-1. In `tool-servers/core_server/server.py`, `run_nmap` exists as a function but is not currently decorated with `@app.post("/tools/run_nmap")`.
-2. In the same function, invalid option branch returns `Disallowed switch {e}` where `e` is undefined.
-3. In `agent/core.py`, `except:` around JSON parsing is broad; malformed responses are silently ignored.
-
-## Next Recommended Improvements
-
-1. Register `/tools/run_nmap` route explicitly.
-2. Fix undefined variable in invalid-flag error path.
-3. Add strict schema validation for model tool JSON.
-4. Add retry/error handling in `mcp_client.call_tool` for network failures.
-5. Persist conversation history and tool traces.
+1. Tool discovery is cached for the lifetime of the process. If the agent already has a non-empty tool cache, newly added or changed tools are not picked up until the process restarts.
+2. The Ollama response is still fully buffered before display, even though upstream streaming is enabled.
+3. Only user inputs are logged today; assistant responses and tool traces are not persisted.
+4. `call_api` is a simple HTTP GET proxy and has no auth, header control, response-size limits, or explicit HTTP-status handling.
+5. `agent/prompt.py` still exists in the repo as an older prompt definition, but the active runtime path uses `BASE_SYSTEM_PROMPT` plus the dynamically built tools section.
 
 ## Additional Docs
 
-- Architecture diagrams: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-- Operations + troubleshooting: [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
+- Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- Operations and troubleshooting: [`docs/RUNBOOK.md`](docs/RUNBOOK.md)

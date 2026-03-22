@@ -54,7 +54,7 @@ Current behavior is more forgiving than before:
 
 - the runtime now builds the prompt lazily
 - if cached discovery is empty, the agent can force a refresh and rebuild the prompt
-- restarting the CLI is still the safest option after tool-server outages or tool-list changes
+- if the agent already has a non-empty cached tool list, restarting the CLI is still the safest option after tool-server outages or tool-list changes
 
 ## Quick Health Checks
 
@@ -142,7 +142,8 @@ Why this happens:
 
 - tool discovery may have returned an empty list earlier
 - discovered tools are cached in `TOOLS_CACHE`
-- the prompt may need a refresh or process restart to pick up newly added tools
+- the prompt only force-refreshes when cached discovery is empty
+- newly added tools on an already healthy cache still require a process restart
 
 ### `Connection refused` to Ollama
 
@@ -193,7 +194,7 @@ Possible causes:
 - `call_tool()` tries each configured MCP server in sequence.
 - `discover_tools()` caches tool metadata for the duration of the process.
 - `discover_tools(force_refresh=True)` is used when the runtime needs to rebuild the prompt after empty discovery.
-- `call_api` performs a simple HTTP GET and returns raw text.
+- `call_api` performs a simple HTTP GET and returns raw text without explicit HTTP-status handling.
 - Tool output is filtered for selected sensitive phrases before display.
 - top-level CLI and Ollama errors are handled more gracefully and should not terminate the session immediately.
 - This stack is a local development prototype and should not be exposed publicly without authentication and tighter policy controls.

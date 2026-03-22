@@ -9,7 +9,7 @@ This project is split into two runtimes:
 - The CLI agent handles prompting, guardrails, tool-call detection, and output display.
 - The tool server exposes a small HTTP tool surface for file reads, HTTP fetches, and `nmap` scans.
 
-The current codebase builds the system prompt dynamically by discovering tools from the running tool server and converting them into a YAML tool section. The prompt is initialized lazily and can refresh tool metadata if discovery was unavailable earlier in the session.
+The current codebase builds the system prompt dynamically by discovering tools from the running tool server and converting them into a YAML tool section. The prompt is initialized lazily and can rebuild itself if the initial tool discovery was empty.
 
 ## Architecture At A Glance
 
@@ -97,7 +97,7 @@ The agent no longer relies on a hardcoded tool list at runtime. Instead:
 - the YAML is appended to `BASE_SYSTEM_PROMPT`
 - `get_system_prompt()` rebuilds the prompt if it has not been initialized yet or if cached discovery is empty
 
-Important consequence: starting the tool server before `python main.py` is still the best path, but the agent can now recover by refreshing tool discovery when a request is handled.
+Important consequence: starting the tool server before `python main.py` is still the best path. The agent can recover from an earlier empty discovery result, but it does not continuously refresh a healthy non-empty tool cache.
 
 ## Setup
 
@@ -157,7 +157,7 @@ Expected model tool call:
 {
   "tool": "read_file",
   "args": {
-    "file_path": "/abs/path/file.txt"
+    "file_path": "README.md"
   }
 }
 ```
@@ -202,10 +202,10 @@ If multiple MCP servers are configured, tool execution now skips servers that re
 
 ## Current Limitations
 
-1. Tool discovery is cached, so newly added tools on a healthy running server are not picked up until a refresh path runs or the agent restarts.
+1. Tool discovery is cached for the lifetime of the process. If the agent already has a non-empty tool cache, newly added or changed tools are not picked up until the process restarts.
 2. The Ollama response is still fully buffered before display, even though upstream streaming is enabled.
 3. Only user inputs are logged today; assistant responses and tool traces are not persisted.
-4. `call_api` is a simple HTTP GET proxy and has no auth, header control, or response-size limits.
+4. `call_api` is a simple HTTP GET proxy and has no auth, header control, response-size limits, or explicit HTTP-status handling.
 5. `agent/prompt.py` still exists in the repo as an older prompt definition, but the active runtime path uses `BASE_SYSTEM_PROMPT` plus the dynamically built tools section.
 
 ## Additional Docs

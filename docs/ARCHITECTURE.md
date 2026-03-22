@@ -41,7 +41,7 @@ flowchart TD
     G --> K
 ```
 
-Starting the tool server before the CLI still gives the cleanest startup, but the runtime can now recover from an earlier failed discovery attempt.
+Starting the tool server before the CLI still gives the cleanest startup. The runtime can recover from an earlier empty discovery attempt, but it does not automatically refresh a healthy non-empty cache when the server's tool list changes later.
 
 ## Request Lifecycle
 
@@ -225,8 +225,8 @@ The client adds a `server` field to each discovered tool entry before caching it
 
 ## Current Limitations
 
-1. Tool discovery is cached for the lifetime of the process, so prompt-visible tool changes require an agent restart.
+1. Tool discovery is cached for the lifetime of the process. The runtime only force-refreshes when the cache is empty, so prompt-visible tool changes on an already healthy server require an agent restart.
 2. The Ollama response is buffered completely before any user-visible output is printed, even though streaming is enabled upstream.
 3. Logging currently captures user inputs only.
-4. `call_api` performs a raw GET and returns the response body as text without additional policy or shaping.
+4. `call_api` performs a raw GET and returns the response body as text without additional policy, shaping, or explicit HTTP-status handling.
 5. `agent/prompt.py` remains as an older prompt definition and may confuse future maintenance unless it is removed or clearly deprecated.

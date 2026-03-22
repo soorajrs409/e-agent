@@ -27,17 +27,17 @@ The current implementation builds the system prompt lazily on demand, then reuse
 
 ```mermaid
 flowchart TD
-    A[agent_stream_chat] --> B[get_system_prompt()]
-    B --> C{system_prompt cached?}
-    C -- no --> D[discover_tools force_refresh=True]
-    C -- yes --> E[discover_tools from cache]
-    E --> F{tools empty?}
+    A["agent_stream_chat"] --> B["get_system_prompt"]
+    B --> C{"system_prompt cached?"}
+    C -- no --> D["discover_tools(force_refresh=True)"]
+    C -- yes --> E["discover_tools(from cache)"]
+    E --> F{"tools empty?"}
     F -- yes --> D
-    F -- no --> G[reuse cached prompt]
-    D --> H[build_tools_section()]
-    H --> I[BASE_SYSTEM_PROMPT + YAML tool section]
-    I --> J[cache system_prompt]
-    J --> K[return prompt]
+    F -- no --> G["reuse cached prompt"]
+    D --> H["build_tools_section"]
+    H --> I["BASE_SYSTEM_PROMPT + YAML tool section"]
+    I --> J["cache system_prompt"]
+    J --> K["return prompt"]
     G --> K
 ```
 

@@ -105,7 +105,7 @@ The agent SHALL read configuration from `langchain_agent/config.py`.
 #### Scenario: Model configuration
 - **WHEN** agent starts
 - **THEN** it SHALL connect to Ollama using configured host and model name
-- **THEN** default values: model="llama3", host="http://127.0.0.1:11434"
+- **THEN** default values: model="llama3.1", host="http://127.0.0.1:11434"
 
 #### Scenario: Agent naming
 - **WHEN** CLI starts

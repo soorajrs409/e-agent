@@ -34,23 +34,6 @@ class RateLimiter:
             self._counters[tool_name].append(now)
             return True, ""
 
-        with self._lock:
-            now = datetime.now()
-            window_start = now - timedelta(minutes=1)
-
-            self._counters[tool_name] = [
-                ts for ts in self._counters[tool_name] if ts > window_start
-            ]
-
-            if len(self._counters[tool_name]) >= GUARDRAILS_RATE_LIMIT_MAX_PER_MINUTE:
-                return (
-                    False,
-                    f"Rate limit exceeded for {tool_name}. Max {GUARDRAILS_RATE_LIMIT_MAX_PER_MINUTE} per minute.",
-                )
-
-            self._counters[tool_name].append(now)
-            return True, ""
-
     def reset(self, tool_name: str = None):
         with self._lock:
             if tool_name:

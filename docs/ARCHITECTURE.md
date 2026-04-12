@@ -39,28 +39,37 @@ flowchart LR
         ┌───────────┴───────────┐
         ▼                   ▼
    guardrails.py     stream_agent()
-                         │
-                         ▼
-              ┌────────────────────┐
-              │ LangGraph Agent    │
-              ├────────────────────┤
-              │ should_continue() │──→ decides: continue/end
-              │ call_llm()         │──→ calls ChatOllama
-              │ execute_tool_node() │──→ executes tools + emits events
-              └────────────────────┘
-                         │
-              ┌────────────┴────────────┐
-              ▼                         ▼
-         Tool Events          Tool Results
-         (callback)           (to LLM)
+                          │
+                          ▼
+               ┌────────────────────┐
+               │ LangGraph Agent    │
+               ├────────────────────┤
+               │ greeting_check()   │──→ decides: greeting or continue
+               │ greeting_response()│──→ direct reply for greetings
+               │ should_continue() │──→ decides: continue or END
+               │ call_llm()         │──→ calls ChatOllama
+               │ execute_tool_node()│──→ executes tools + emits events
+               └────────────────────┘
+                          │
+               ┌────────────┴────────────┐
+               ▼                         ▼
+          Tool Events          Tool Results
+          (callback)           (to LLM)
 ```
 
 ## Tool Chaining Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  User: "scan server and check for vulns"               │
+│  User: "scan server and check for vulns"                    │
 └─────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+              ┌───────────────────────┐
+              │  greeting_check()      │
+              │  → "continue" (not a  │
+              │    greeting)          │
+              └───────────────────────┘
                           │
                           ▼
               ┌───────────────────────┐
@@ -69,15 +78,15 @@ flowchart LR
               │  2. run_nuclei        │
               └───────────────────────┘
                           │
-          ┌───────────────┼───────────────┐
-          ▼               ▼               ▼
-    Tool 1 runs       Error?          Approval?
-    + events        ↓↓                   ↓↓
-    output ──►   LLM decides    Pause until
-    to LLM       alternate      /approve X
-    ↓↓          or stop
-    Tool 2
-    ...
+           ┌───────────────┼───────────────┐
+           ▼               ▼               ▼
+     Tool 1 runs       Error?          Approval?
+     + events        ↓↓                   ↓↓
+     output ──►   chain stops    chain pauses
+     to LLM                       /approve X
+     ↓↓                           (single tool
+     Tool 2                        only)
+     ...
 ```
 
 ## Agent State (TypedDict)
@@ -85,11 +94,11 @@ flowchart LR
 ```python
 class AgentState(TypedDict):
     messages: list[BaseMessage]      # conversation history
-    tool_results: list[str]        # outputs from each tool
-    chain_depth: int             # tools executed so far
-    pending_approval: dict | None  # approval state if paused
-    retry_count: int            # error recovery attempts
-    last_error: str | None     # last error for fallback
+    tool_results: list[str]          # outputs from each tool
+    chain_depth: int                 # tools executed so far
+    pending_approval: dict | None    # approval state if paused
+    retry_count: int                 # reserved (currently unused)
+    last_error: str | None          # set on error → terminates chain
 ```
 
 ## Key Components
@@ -100,17 +109,18 @@ class AgentState(TypedDict):
 
 ### LangGraph StateGraph
 - Tool calling with explicit state management
-- Supports: think → act → observe → repeat loop
+- Greeting detection bypasses tools for casual input
 - Max chain length: 5 tools (enforced)
-- Error recovery: 1 retry per tool with fallback
+- Errors terminate the chain (no retry)
 
 ### ToolEvent System
 ```python
 class ToolEvent:
-    tool_name: str      # which tool
-    event_type: str    # "started", "completed", "failed"
-    message: str     # error message if failed
-    timestamp: str   # ISO timestamp
+    def __init__(self, tool_name: str, event_type: str, message: str = ""):
+        self.tool_name = tool_name    # which tool
+        self.event_type = event_type  # "started", "completed", "failed"
+        self.message = message        # error message if failed (default: "")
+        self.timestamp = datetime.now().isoformat()  # set automatically
 ```
 
 ### @tool Decorated Functions
@@ -131,7 +141,7 @@ sequenceDiagram
     Main->>Agent: stream_agent(prompt, event_callback)
     
     rect rgb(240, 248, 255)
-        Note over Agent,LLM: Chain iteration 1
+        Note over Agent: greeting_check() → "continue"
         Agent->>LLM: chat completion + tools
         LLM-->>Agent: tool_calls = [run_nmap]
         Note over Agent: should_continue() → "continue"
@@ -147,8 +157,7 @@ sequenceDiagram
         LLM-->>Agent: tool_calls = [run_nuclei]
         Note over Agent: should_continue() → "continue"
         Agent->>Tool: execute run_nuclei
-        Tool-->>Agent: tool_result
-        Note over Agent: emit ToolEvent("started")
+        Tool-->>Agent: approval_required
     end
     
     rect rgb(255, 240, 240)
@@ -160,12 +169,11 @@ sequenceDiagram
     end
     
     rect rgb(240, 255, 240)
-        Note over User,Main: On approval
+        Note over User,Main: On approval (single tool only, chain does not resume)
         User->>Main: /approve X
-        Main->>Agent: execute approved tool
+        Main->>Tool: execute approved tool
     end
     
-    Agent-->>Main: final response
     Main-->>User: display + tool events
 ```
 
@@ -183,12 +191,11 @@ sequenceDiagram
 - `stream_agent(event_callback)` with events
 - `invoke_agent()` for blocking calls
 - Tool execution state management
-- Error recovery logic
+- Greeting detection for casual input
 
 ### langchain_agent/tools.py
 - `@tool` decorated functions
 - `ToolEvent` class for lifecycle events
-- `set_tool_event_callback()` registration
 - `get_tool_function()` lookup
 
 ### langchain_agent/guardrails.py
@@ -197,7 +204,7 @@ sequenceDiagram
 
 ### langchain_agent/approval_queue.py
 - Approval request management
-- `chain_state` for resume after approval
+- `chain_state` stored with request (for future chain resume)
 
 ### langchain_agent/rate_limiter.py
 - Per-tool rate limiting
@@ -212,11 +219,14 @@ All tools return standardized `ToolOutput`:
 
 ```python
 class ToolOutput(BaseModel):
-    status: str        # "success", "error", "blocked"
-    tool: str          # tool name
-    output: str      # result message
-    saved_to: str | None  # file path if saved
+    status: str             # "success", "error", "blocked", "approval_required"
+    tool: str               # tool name
+    output: str             # result message
+    saved_to: str | None    # file path if saved
 ```
+
+Tools requiring approval return an `ApprovalRequired` model with a
+`request_id` that the user must approve via `/approve <id>`.
 
 ## Security
 
@@ -240,12 +250,15 @@ Tool events stream during execution:
 [✓] run_nuclei completed
 ```
 
-Approval pauses execution:
+Approval pauses the chain (does not resume it):
 ```
 [*] Running run_nmap...
 [✓] run_nmap completed
 [approval_required] Use /approve abc123
 ```
+
+After `/approve`, only the single approved tool runs — the chain does not
+continue automatically.
 
 ## Future Extensibility
 

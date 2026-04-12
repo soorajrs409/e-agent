@@ -24,7 +24,7 @@ SANDBOX_DIRS = _config.get("sandbox", {}).get(
     "directories", ["scans", "downloads", "temp"]
 )
 
-TOOLS_AUTO = _config.get("tools", {}).get("auto", ["read_file", "call_api", "run_nmap"])
+TOOLS_AUTO = _config.get("tools", {}).get("auto", ["read_file", "call_api"])
 TOOLS_APPROVAL_REQUIRED = _config.get("tools", {}).get(
     "approval_required", ["run_nuclei"]
 )

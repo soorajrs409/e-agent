@@ -53,28 +53,31 @@ python -c "from langchain_agent.agent import create_langgraph_agent; print('OK')
 
 ## Tool Chaining
 
-### Approving tools mid-chain
+### Approving tools that require approval
 
-When the agent runs multiple tools and one requires approval:
+When the agent runs a tool that requires approval:
 
 ```
 [*] Running run_nmap...
-[✓] run_nmap completed
+[✗] run_nmap failed: approval required
 [approval_required] Use /approve abc123 to execute this command.
 ```
 
-Approve and execution continues:
+Approve the single tool:
 
 ```bash
 /approve abc123
 ```
 
+Note: After approval, only the approved tool runs. If the request was part
+of a multi-tool chain, the chain does not resume automatically. Re-issue
+the original prompt to continue.
+
 ### Checking pending approvals
 
-```bash
-# Check what approvals are pending
-curl -s http://127.0.0.1:11434  # Still running
-```
+Currently there is no CLI command to list pending approvals. The agent
+displays the request ID when approval is needed. Use `/approve <id>` or
+`/deny <id>` with the displayed ID.
 
 ### Auto-approve all requests
 
@@ -128,15 +131,12 @@ The agent streams tool lifecycle events:
 
 ### Chain too long
 
-If chain exceeds 5 tools:
-
-```
-[chain truncated at 5 tools - re-run for remaining steps]
-```
+If a chain exceeds 5 tools, the chain ends after the 5th tool. Any
+remaining tools are not executed. Re-issue the command to continue.
 
 ### Approval expired
 
-Approval requests expire after 5 minutes:
+Approval requests expire (default 5 minutes, configurable in `config.yaml`):
 
 ```
 Request abc123 has expired. Please re-issue the command.
@@ -144,12 +144,13 @@ Request abc123 has expired. Please re-issue the command.
 
 ### Error during chain
 
-On tool error, the agent tries alternate parameters once:
+On tool error, the chain terminates:
 
 ```
 [error] Error: Disallowed switch '-T4'
-# Agent might retry with different flags
 ```
+
+Re-issue the command with corrected parameters.
 
 ## Logs
 
@@ -212,7 +213,8 @@ logging:
 To see chain state during execution:
 
 ```python
-from langchain_agent.agent import stream_agent, ToolEvent
+from langchain_agent.agent import stream_agent
+from langchain_agent.tools import ToolEvent
 
 def debug_cb(e: ToolEvent):
     print(f"EVENT: {e.format()}")

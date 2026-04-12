@@ -13,6 +13,8 @@ Single process only — no tool server needed.
 - `langchain_agent/agent.py` = LangGraph StateGraph with tool chaining
 - `langchain_agent/tools.py` = `@tool` functions + ToolEvent class
 - `langchain_agent/guardrails.py` = input/target validation
+- `langchain_agent/approval_queue.py` = approval system + chain state
+- `langchain_agent/rate_limiter.py` = per-tool rate limiting
 - `langchain_agent/config.py` = model/host configuration
 
 ## Key Ports
@@ -26,11 +28,20 @@ Single process only — no tool server needed.
 ```
 User Input → StateGraph Agent
     │
-    ├─→ should_continue() → decides: continue/end
-    ├─→ call_llm() → ChatOllama with tools
+    ├─→ greeting_check() → decides: greeting or continue
+    │       ├─→ greeting_response() → direct reply, then END
+    │       └─→ call_llm() → ChatOllama with tools
+    │
+    ├─→ should_continue() → decides: continue or END
+    │       ├─→ has tool_calls → continue
+    │       ├─→ pending_approval → END
+    │       ├─→ last_error → END
+    │       └─→ max chain depth → END
+    │
     ├─→ execute_tool_node() → executes tools
     │       ├─→ emits ToolEvent (started/completed/failed)
     │       └─→ stores result in state
+    │
     └─→ Max chain: 5 tools enforced
 ```
 
@@ -40,22 +51,22 @@ Live streaming of tool lifecycle:
 
 ```python
 class ToolEvent:
-    tool_name: str      # "run_nmap", "read_file"
-    event_type: str   # "started", "completed", "failed"
-    message: str      # error message if failed
-    timestamp: str    # ISO timestamp
+    def __init__(self, tool_name: str, event_type: str, message: str = ""):
+        self.tool_name = tool_name    # "run_nmap", "read_file"
+        self.event_type = event_type  # "started", "completed", "failed"
+        self.message = message        # error message if failed (default: "")
+        self.timestamp = datetime.now().isoformat()  # set automatically
 ```
 
 Usage in code:
 
 ```python
-from langchain_agent.agent import stream_agent, ToolEvent
-
-def cb(event: ToolEvent):
-    print(event.format())  # [*] Running tool...
-
-for chunk in stream_agent("prompt", event_callback=cb):
-    print(chunk)
+from langchain_agent.agent import stream_agent
+from langchain_agent.tools import ToolEvent
+events = []
+for chunk in stream_agent('read sandbox/test.txt', event_callback=lambda e: events.append(e.format())):
+    pass
+print(events)
 ```
 
 ## Guardrails
@@ -63,7 +74,7 @@ for chunk in stream_agent("prompt", event_callback=cb):
 - `guardrails.py` blocks targets: `127.0.0.1`, `localhost`, `169.254.169.254`
 - `run_nmap` allows flags: `-sV`, `-sS`, `-Pn`, `-F`, `-O`
 - Input max 5000 chars; prompt-injection blocked
-- Max 5 tools per chain
+- Max 5 tools per chain; errors terminate chain
 
 ## Dependencies
 
@@ -79,8 +90,8 @@ The agent uses LangGraph for multi-tool chains:
 - LLM decides when to call 2+ tools
 - Tools execute sequentially with events
 - Output from one tool feeds to next
-- Error triggers fallback attempt
-- Approval pauses mid-chain
+- Errors terminate the chain (no retry)
+- Approval pauses mid-chain (single tool only on resume)
 
 ## Testing
 
@@ -89,17 +100,6 @@ Verify LangGraph:
 curl -s http://127.0.0.1:11434/api/tags  # Ollama health
 python -c "from langchain_agent.agent import create_langgraph_agent; print('OK')"  # agent
 python -c "from langchain_agent.tools import ToolEvent; print('OK')"  # events
-```
-
-Test chain:
-```bash
-python -c "
-from langchain_agent.agent import stream_agent, ToolEvent
-events = []
-for chunk in stream_agent('read sandbox/test.txt', event_callback=lambda e: events.append(e.format())):
-    pass
-print(events)
-"
 ```
 
 ## OpenSpec Workflow

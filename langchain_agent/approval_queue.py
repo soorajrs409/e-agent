@@ -2,6 +2,8 @@ import uuid
 from datetime import datetime, timedelta
 from enum import Enum
 
+from langchain_agent.config import APPROVAL_TIMEOUT_MINUTES
+
 
 class ApprovalStatus(Enum):
     PENDING = "pending"
@@ -16,7 +18,7 @@ class ApprovalRequest:
         self.tool = tool
         self.args = args
         self.created_at = datetime.now()
-        self.expires_at = self.created_at + timedelta(minutes=5)
+        self.expires_at = self.created_at + timedelta(minutes=APPROVAL_TIMEOUT_MINUTES)
         self.status = ApprovalStatus.PENDING
         self.chain_state = chain_state or {}
 

@@ -47,7 +47,7 @@ flowchart LR
 |---------|-------------|
 | Multi-tool chains | Execute 2+ tools sequentially |
 | Live streaming | See tool output as it runs |
-| Error recovery | Agent tries alternate approach on failure |
+| Chain termination | Errors or approval needs stop the chain |
 | Approval integration | Pauses mid-chain for approval |
 | Context passing | Tool outputs feed into next tool |
 
@@ -144,46 +144,46 @@ Tool lifecycle streams to the console:
 [✗] run_nuclei failed: approval required  # Needs approval
 ```
 
-### Approval in Chains
+### Approval in Tools
 
-When a tool needs approval mid-chain:
-
-```
-[*] Running run_nmap...
-[✓] run_nmap completed
-[approval_required] Use /approve abc123 to execute this command.
-```
-
-Continue after approval:
-
-```
-[+] you -> /approve abc123
-Executing run_nuclei...
-[vuln results...]
-[✓] run_nuclei completed
-```
-
-### Error Recovery
-
-On tool error, agent tries alternate parameters once:
+When a tool requires approval:
 
 ```
 [+] you -> scan example.com
-[*] Running run_nmap -T4 example.com
-[error] Disallowed switch -T4
+[*] Running run_nmap...
+[✗] run_nmap failed: approval required
+[approval_required] Use /approve abc123 to execute this command.
+```
 
-# Agent tries alternate:
-[*] Running run_nmap -F example.com
+Approving executes only the requested tool (the chain does not resume):
+
+```
+[+] you -> /approve abc123
+Executing run_nmap...
 [✓] run_nmap completed
 ```
 
+Note: After approval, only that single tool runs. If you had a multi-step
+request, re-issue the original prompt to continue.
+
+### Error Handling
+
+On tool error, the chain terminates:
+
+```
+[+] you -> scan example.com
+[*] Running run_nmap...
+[✗] run_nmap failed: Disallowed switch -T4
+[error] Disallowed switch -T4
+```
+
+The chain stops. Re-issue the command with corrected parameters.
+
 ### Chain Limits
 
-Max 5 tools per chain to prevent runaway:
-
-```
-[chain truncated at 5 tools - re-run for remaining steps]
-```
+Max 5 tools per chain to prevent runaway. When the limit is reached,
+the chain ends and any remaining tools are not executed. Re-issue the
+command to continue from where it stopped.
 
 ## Configuration
 
@@ -241,8 +241,8 @@ Executing run_nuclei...
 ### Auto-approve
 
 ```
-[+] you -> /approve-all nmap
-All nmap commands will now execute without approval.
+[+] you -> /approve-all run_nmap
+All run_nmap commands will now execute without approval for this session.
 ```
 
 ## Sandbox

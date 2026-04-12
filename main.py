@@ -73,6 +73,15 @@ def handle_approve(request_id: str) -> str:
             saved_info = f"\n[Saved to: {output.saved_to}]" if output.saved_to else ""
             return f"Executing {tool_name}...\n{output.output}{saved_info}"
 
+        if tool_name == "run_nmap":
+            from langchain_agent.tools import _execute_nmap
+
+            output = _execute_nmap(args.get("target", ""), args.get("options", ""))
+            logger.info(
+                f"TOOL_EXEC: {tool_name} output: {len(output) if output else 0} chars"
+            )
+            return f"Executing {tool_name}...\n{output}"
+
         from langchain_agent.tools import get_tool_function
 
         tool_func = get_tool_function(tool_name)
@@ -102,6 +111,12 @@ def handle_deny(request_id: str) -> str:
 
 
 def handle_approve_all(tool_name: str) -> str:
+    # Allow both "nuclei" and "run_nuclei" aliases
+    if tool_name == "nuclei":
+        tool_name = "run_nuclei"
+    elif tool_name == "nmap":
+        tool_name = "run_nmap"
+
     if tool_name not in TOOLS_APPROVAL_REQUIRED:
         return f"Tool {tool_name} does not require approval."
     approval_queue.approve_all(tool_name)

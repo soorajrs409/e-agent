@@ -70,7 +70,9 @@ def call_api(url: str) -> Union[str, ToolOutput]:
 
 
 @tool
-def run_nmap(target: str, options: str = "-sV") -> Union[str, ToolOutput]:
+def run_nmap(
+    target: str, options: str = "-sV"
+) -> Union[ApprovalRequired, str, ToolOutput]:
     """Run network scan to find open ports/services."""
     allowed, reason = validate_nmap_target(target)
     if not allowed:
@@ -83,8 +85,31 @@ def run_nmap(target: str, options: str = "-sV") -> Union[str, ToolOutput]:
         if opt not in allowed_flags:
             return f"Error: Disallowed switch '{opt}'"
 
+    queue = get_approval_queue()
+    if queue.is_auto_approved("run_nmap"):
+        return _execute_nmap(target, options)
+
+    request_id = queue.add_request(
+        "run_nmap",
+        {"target": target, "options": options},
+        lambda: _execute_nmap(target, options),
+    )
+
+    if request_id == "auto_approved":
+        return _execute_nmap(target, options)
+
+    return ApprovalRequired(
+        status="approval_required",
+        request_id=request_id,
+        tool="run_nmap",
+        message=f"Use /approve {request_id} to execute this command.",
+    )
+
+
+def _execute_nmap(target: str, options: str) -> str:
+    """Execute nmap scan."""
     try:
-        cmd = ["nmap"] + option_list + [target]
+        cmd = ["nmap"] + shlex.split(options) + [target]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
         if result.returncode != 0:
@@ -97,7 +122,8 @@ def run_nmap(target: str, options: str = "-sV") -> Union[str, ToolOutput]:
         scans_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        file_path = scans_dir / f"nmap-{target}-{timestamp}.txt"
+        safe_target = target.replace("://", "-").replace("/", "-").replace(":", "-")
+        file_path = scans_dir / f"nmap-{safe_target}-{timestamp}.txt"
         file_path.write_text(output)
 
         return f"{output}\n\n[Saved to: {file_path}]"

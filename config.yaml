@@ -31,6 +31,13 @@ tools:
   approval_required:
     - run_nmap
     - run_nuclei
+  # Tool-specific settings
+  call_api:
+    timeout: 20
+  nmap:
+    timeout: 600
+  nuclei:
+    timeout: 600
 
 # Guardrails Settings
 guardrails:
@@ -60,3 +67,10 @@ approval:
   timeout_minutes: 5
   # Enable session-based auto-approval (/approve-all)
   allow_approve_all: true
+
+# Logging Settings
+logging:
+  # Log rotation interval (days)
+  rotation_days: 7
+  # Number of backup logs to keep
+  backup_count: 7

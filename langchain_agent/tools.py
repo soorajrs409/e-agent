@@ -9,7 +9,12 @@ from pydantic import BaseModel
 import os
 
 from langchain_agent.guardrails import validate_nmap_target, validate_nuclei_target
-from langchain_agent.config import get_sandbox_path
+from langchain_agent.config import (
+    get_sandbox_path,
+    TOOL_CALL_API_TIMEOUT,
+    TOOL_NMAP_TIMEOUT,
+    TOOL_NUCLEI_TIMEOUT,
+)
 from langchain_agent.approval_queue import get_approval_queue
 from langchain_agent.rate_limiter import get_rate_limiter
 
@@ -102,7 +107,7 @@ def call_api(url: str) -> ToolOutput:
         )
 
     try:
-        r = requests.get(url, timeout=20)
+        r = requests.get(url, timeout=TOOL_CALL_API_TIMEOUT)
         content = r.text
 
         saved_path = None
@@ -193,7 +198,9 @@ def _execute_nmap(target: str, options: str) -> ToolOutput:
     """Execute nmap scan."""
     try:
         cmd = ["nmap"] + shlex.split(options) + [target]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=TOOL_NMAP_TIMEOUT
+        )
 
         if result.returncode != 0:
             return ToolOutput(
@@ -336,7 +343,7 @@ def _execute_nuclei(target: str, options: str) -> ToolOutput:
         ] + shlex.split(options)
 
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=600, env=env
+            cmd, capture_output=True, text=True, timeout=TOOL_NUCLEI_TIMEOUT, env=env
         )
 
         if result.returncode != 0 and result.returncode != 1:

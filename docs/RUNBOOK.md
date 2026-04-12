@@ -104,6 +104,12 @@ sandbox:
 tools:
   auto: [read_file, call_api]
   approval_required: [run_nmap, run_nuclei]
+  call_api:
+    timeout: 20  # HTTP request timeout in seconds
+  nmap:
+    timeout: 600  # nmap scan timeout in seconds
+  nuclei:
+    timeout: 600  # nuclei scan timeout in seconds
 
 guardrails:
   max_input_length: 5000
@@ -116,6 +122,10 @@ guardrails:
   rate_limit:
     enabled: true
     max_per_minute: 30
+
+logging:
+  rotation_days: 7    # Log rotation interval
+  backup_count: 7    # Number of backup logs
 ```
 
 ## Troubleshooting

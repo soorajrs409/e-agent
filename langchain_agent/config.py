@@ -32,6 +32,13 @@ TOOLS_APPROVAL_REQUIRED = _config.get("tools", {}).get(
 APPROVAL_TIMEOUT_MINUTES = _config.get("approval", {}).get("timeout_minutes", 5)
 APPROVAL_ALLOW_APPROVE_ALL = _config.get("approval", {}).get("allow_approve_all", True)
 
+TOOL_CALL_API_TIMEOUT = _config.get("tools", {}).get("call_api", {}).get("timeout", 20)
+TOOL_NMAP_TIMEOUT = _config.get("tools", {}).get("nmap", {}).get("timeout", 600)
+TOOL_NUCLEI_TIMEOUT = _config.get("tools", {}).get("nuclei", {}).get("timeout", 600)
+
+LOG_ROTATION_DAYS = _config.get("logging", {}).get("rotation_days", 7)
+LOG_BACKUP_COUNT = _config.get("logging", {}).get("backup_count", 7)
+
 GUARDRAILS_MAX_INPUT_LENGTH = _config.get("guardrails", {}).get(
     "max_input_length", 5000
 )
@@ -74,4 +81,19 @@ def get_guardrails_config() -> dict:
         "nmap_allowed_flags": GUARDRAILS_NMAP_ALLOWED_FLAGS,
         "rate_limit_enabled": GUARDRAILS_RATE_LIMIT_ENABLED,
         "rate_limit_max_per_minute": GUARDRAILS_RATE_LIMIT_MAX_PER_MINUTE,
+    }
+
+
+def get_tool_timeouts() -> dict:
+    return {
+        "call_api": TOOL_CALL_API_TIMEOUT,
+        "nmap": TOOL_NMAP_TIMEOUT,
+        "nuclei": TOOL_NUCLEI_TIMEOUT,
+    }
+
+
+def get_logging_config() -> dict:
+    return {
+        "rotation_days": LOG_ROTATION_DAYS,
+        "backup_count": LOG_BACKUP_COUNT,
     }

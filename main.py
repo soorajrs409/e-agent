@@ -10,6 +10,8 @@ from langchain_agent.config import (
     get_sandbox_path,
     SANDBOX_DIRS,
     TOOLS_APPROVAL_REQUIRED,
+    LOG_ROTATION_DAYS,
+    LOG_BACKUP_COUNT,
 )
 from langchain_agent.approval_queue import get_approval_queue, ApprovalStatus
 
@@ -18,7 +20,11 @@ def setup_logging():
     os.makedirs(os.path.dirname(LOG_FILE) or "logs", exist_ok=True)
 
     handler = logging.handlers.TimedRotatingFileHandler(
-        LOG_FILE, when="midnight", interval=7, backupCount=7, encoding="utf-8"
+        LOG_FILE,
+        when="midnight",
+        interval=LOG_ROTATION_DAYS,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
     )
     handler.suffix = "%Y-%m-%d"
 

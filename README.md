@@ -141,6 +141,12 @@ tools:
   approval_required:
     - run_nmap
     - run_nuclei
+  call_api:
+    timeout: 20
+  nmap:
+    timeout: 600
+  nuclei:
+    timeout: 600
 
 guardrails:
   max_input_length: 5000
@@ -158,6 +164,10 @@ guardrails:
   rate_limit:
     enabled: true
     max_per_minute: 30
+
+logging:
+  rotation_days: 7
+  backup_count: 7
 
 approval:
   timeout_minutes: 5

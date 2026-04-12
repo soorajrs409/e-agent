@@ -16,7 +16,7 @@ uv pip install -r requirements.txt
 
 ```bash
 ollama serve
-ollama pull llama3
+ollama pull llama3.1
 ```
 
 ### 3. Start the CLI agent
@@ -81,7 +81,7 @@ Possible causes:
 Edit `langchain_agent/config.py`:
 
 ```python
-MODEL_NAME = "llama3"
+MODEL_NAME = "llama3.1"
 OLLAMA_HOST = "http://127.0.0.1:11434"
 AGENT_NAME = "electron-agent"
 LOG_FILE = "logs/agent.log"

@@ -116,7 +116,7 @@ sequenceDiagram
 - `validate_nmap_target()`: blocks localhost/127.0.0.1/metadata IP
 
 ### langchain_agent/config.py
-- `MODEL_NAME`: Ollama model (default: "llama3")
+- `MODEL_NAME`: Ollama model (default: "llama3.1")
 - `OLLAMA_HOST`: Ollama API URL
 - `AGENT_NAME`: display name
 - `LOG_FILE`: log file path

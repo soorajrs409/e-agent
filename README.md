@@ -1,10 +1,10 @@
 # e-agent
 
-Local CLI AI agent powered by Ollama with LangChain for tool-calling orchestration.
+Local CLI AI agent powered by Ollama with LangGraph for multi-tool chaining.
 
 ## Overview
 
-This project uses LangChain's ReAct agent pattern with Ollama for natural language understanding and tool execution. Tools are defined as Python functions with `@tool` decorators.
+e-agent uses LangGraph's StateGraph for tool chaining orchestration. It can execute multiple tools sequentially, pass outputs between tools, and stream tool lifecycle events in real-time.
 
 ## Architecture At A Glance
 
@@ -14,20 +14,20 @@ flowchart LR
     CLI --> GUARD[guardrails.py]
     CLI --> AGENT[agent.py]
     AGENT --> LLM[ChatOllama]
-    AGENT --> TOOLS[tools.py]
+    AGENT --> GRAPH[LangGraph]
+    GRAPH --> TOOLS[tools.py]
+    
+    GRAPH --> EV[Tool Events]
+    EV --> CLI
     
     TOOLS --> TF[read_file]
     TOOLS --> TA[call_api]
     TOOLS --> TN[run_nmap]
     TOOLS --> TNU[run_nuclei]
     
-    TN --> AQ[Approval Queue]
-    TNU --> AQ
+    TOOLS --> AQ[Approval Queue]
     
-    CLI --> AQ
-    CLI --> LOG[(logs/)]
     CLI --> SB[sandbox/]
-    
     SB --> SC[scans/]
     SB --> DL[downloads/]
     SB --> TM[temp/]
@@ -35,47 +35,47 @@ flowchart LR
     subgraph langchain_agent[langchain_agent]
         GUARD
         AGENT
+        GRAPH
         TOOLS
         AQ
     end
 ```
 
+## Key Features
+
+| Feature | Description |
+|---------|-------------|
+| Multi-tool chains | Execute 2+ tools sequentially |
+| Live streaming | See tool output as it runs |
+| Error recovery | Agent tries alternate approach on failure |
+| Approval integration | Pauses mid-chain for approval |
+| Context passing | Tool outputs feed into next tool |
+
 ## Repository Layout
 
-```text
+```
 .
 ├── main.py                 # CLI entry point
-├── config.yaml             # Configuration file
-├── requirements.txt       # Python dependencies
+├── config.yaml           # Configuration file
+├── requirements.txt      # Python dependencies
 ├── README.md
 ├── AGENTS.md
-├── sandbox/               # Sandbox workspace (created on startup)
+├── sandbox/             # Sandbox workspace
 │   ├── scans/
 │   ├── downloads/
 │   └── temp/
 ├── langchain_agent/
 │   ├── __init__.py
-│   ├── agent.py           # LangChain ReAct agent setup
-│   ├── config.py          # Configuration loader
-│   ├── tools.py           # @tool decorated functions
-│   ├── guardrails.py      # Input/target/URL validation
-│   ├── approval_queue.py  # Approval system
+│   ├── agent.py         # LangGraph agent setup
+│   ├── config.py       # Configuration loader
+│   ├── tools.py       # @tool decorated functions + ToolEvent
+│   ├── guardrails.py  # Input/target/URL validation
+│   ├── approval_queue.py  # Approval system + chain state
 │   └── rate_limiter.py  # Rate limiting
 └── docs/
     ├── ARCHITECTURE.md
     └── RUNBOOK.md
 ```
-
-## Runtime Flow
-
-1. `main.py` starts CLI loop, logs to `logs/`
-2. Input validated by `guardrails.validate_input()`
-3. For approval-required tools, command is queued and user must approve
-4. User message sent to LangChain `AgentExecutor`
-5. Model decides: respond directly or call tool
-6. If tool call: LangChain executes `@tool` function
-7. Tool result returned to model for final response
-8. Response displayed to user
 
 ## Setup
 
@@ -99,11 +99,10 @@ ollama serve
 ollama pull llama3.1
 ```
 
-### 4. Install Nuclei (optional, for vulnerability scanning)
+### 4. Install Nuclei (optional)
 
 ```bash
-# Download from https://github.com/projectdiscovery/nuclei
-# Or use: go install - github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 ```
 
 ### 5. Start the agent CLI
@@ -114,9 +113,81 @@ python main.py
 
 Type `exit` to quit.
 
+## Tool Chaining
+
+### Example: Multi-tool chain
+
+```
+[+] you -> scan example.com then check for vulnerabilities
+[*] e-agent -> [*] Running run_nmap...
+[Port scan results...]
+[✓] run_nmap completed
+[*] Running run_nuclei...
+[vuln results...]
+[✓] run_nuclei completed
+```
+
+### Live Tool Events
+
+Tool lifecycle streams to the console:
+
+```
+[*] Running read_file...    # Tool started
+[file contents...]
+[✓] read_file completed  # Success
+
+[*] Running run_nmap...   # Next tool started
+[Port results...]
+[✓] run_nmap completed
+
+[*] Running run_nuclei...
+[✗] run_nuclei failed: approval required  # Needs approval
+```
+
+### Approval in Chains
+
+When a tool needs approval mid-chain:
+
+```
+[*] Running run_nmap...
+[✓] run_nmap completed
+[approval_required] Use /approve abc123 to execute this command.
+```
+
+Continue after approval:
+
+```
+[+] you -> /approve abc123
+Executing run_nuclei...
+[vuln results...]
+[✓] run_nuclei completed
+```
+
+### Error Recovery
+
+On tool error, agent tries alternate parameters once:
+
+```
+[+] you -> scan example.com
+[*] Running run_nmap -T4 example.com
+[error] Disallowed switch -T4
+
+# Agent tries alternate:
+[*] Running run_nmap -F example.com
+[✓] run_nmap completed
+```
+
+### Chain Limits
+
+Max 5 tools per chain to prevent runaway:
+
+```
+[chain truncated at 5 tools - re-run for remaining steps]
+```
+
 ## Configuration
 
-Configuration is managed via `config.yaml`:
+Configuration in `config.yaml`:
 
 ```yaml
 model:
@@ -129,49 +200,11 @@ agent:
 
 sandbox:
   path: "./sandbox"
-  directories:
-    - scans
-    - downloads
-    - temp
+  directories: [scans, downloads, temp]
 
 tools:
-  auto:
-    - read_file
-    - call_api
-  approval_required:
-    - run_nmap
-    - run_nuclei
-  call_api:
-    timeout: 20
-  nmap:
-    timeout: 600
-  nuclei:
-    timeout: 600
-
-guardrails:
-  max_input_length: 5000
-  blocked_targets:
-    - "127.0.0.1"
-    - "localhost"
-    - "169.254.169.254"
-  nmap:
-    allowed_flags:
-      - "-sV"
-      - "-sS"
-      - "-Pn"
-      - "-F"
-      - "-O"
-  rate_limit:
-    enabled: true
-    max_per_minute: 30
-
-logging:
-  rotation_days: 7
-  backup_count: 7
-
-approval:
-  timeout_minutes: 5
-  allow_approve_all: true
+  auto: [read_file, call_api]
+  approval_required: [run_nmap, run_nuclei]
 ```
 
 ## Available Tools
@@ -179,13 +212,11 @@ approval:
 | Tool | Category | Description |
 |------|----------|-------------|
 | `read_file` | Auto | Read file contents from disk (sandboxed) |
-| `call_api` | Auto | Make HTTP GET request to a URL |
-| `run_nmap` | Approval | Run network scan (ports/services) |
-| `run_nuclei` | Approval | Run vulnerability scan |
+| `call_api` | Auto | HTTP GET request |
+| `run_nmap` | Approval | Network scan (ports/services) |
+| `run_nuclei` | Approval | Vulnerability scan |
 
 ## Approval System
-
-For tools marked as `approval_required`, you must approve before execution:
 
 ### Commands
 
@@ -193,71 +224,44 @@ For tools marked as `approval_required`, you must approve before execution:
 |---------|-------------|
 | `/approve <id>` | Approve a pending request |
 | `/deny <id>` | Deny a pending request |
-| `/approve-all <tool>` | Auto-approve all requests for a tool in this session |
+| `/approve-all <tool>` | Auto-approve all requests |
 
-### Example Usage
+### Example
 
 ```
-[+] you -> scan example.com for vulnerabilities
+[+] you -> scan example.com
 [*] e-agent -> [Using tool: run_nuclei]
 Use /approve abc12345 to execute this command.
 
 [+] you -> /approve abc12345
 Executing run_nuclei...
-Nuclei scan complete. Results saved to: sandbox/scans/...
+[✓] run_nuclei completed
 ```
 
-### Approve All
-
-For convenience during bug bounty hunting, you can auto-approve all requests for a tool:
+### Auto-approve
 
 ```
-[+] you -> /approve-all nuclei
-All nuclei commands will now execute without approval for this session.
-```
-
-### Synchronous Execution
-
-Nuclei scans run synchronously (wait for completion). After approval:
-- The scan executes immediately and waits for results
-- Results are saved to `sandbox/scans/`
-- Use `read_file` to view results
-
-```
-[+] you -> read /path/to/sandbox/scans/nuclei-...
+[+] you -> /approve-all nmap
+All nmap commands will now execute without approval.
 ```
 
 ## Sandbox
 
-All file operations are sandboxed to prevent access to sensitive files:
+All file operations sandboxed:
 
-- `read_file` - Only reads files within sandbox directory
-- `call_api` - Saves downloads to `sandbox/downloads/`
-- `run_nmap`, `run_nuclei` - Save scan output to `sandbox/scans/`
+- `read_file` - Only sandbox directory
+- `call_api` - Saves to `sandbox/downloads/`
+- `run_nmap`, `run_nuclei` - Save to `sandbox/scans/`
 
 ## Guardrails
 
-### Input validation
-- Rejects input > `guardrails.max_input_length` characters (configurable)
-- Blocks prompt injection phrases
+- Input: max 5000 chars, prompt injection detection
+- Targets: blocks localhost, 127.0.0.1, metadata IPs
+- nmap: flag allowlist (`-sV`, `-sS`, `-Pn`, `-F`, `-O`)
+- call_api: http/https only, no internal URLs
+- Rate limiting: per-tool limits
 
-### Tool restrictions
-- `run_nmap`, `run_nuclei` block targets from `guardrails.blocked_targets` (configurable)
-- `run_nmap` only allows flags from `guardrails.nmap.allowed_flags` (configurable)
-- `call_api` only allows http/https schemes, blocks internal URLs
-- `read_file` restricted to sandbox directory
-- `rate_limiter`: configurable per-tool limits
-
-## Logging
-
-Logs are stored in `logs/` with 7-day rotation:
-- `agent.log.2026-04-12`
-- `agent.log.2026-04-13`
-- etc.
-
-Each log entry includes timestamp, level, and message.
-
-## Additional Docs
+## Documentation
 
 - Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - Operations: [`docs/RUNBOOK.md`](docs/RUNBOOK.md)

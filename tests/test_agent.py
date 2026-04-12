@@ -65,10 +65,16 @@ def run_tests():
         test_file = get_sandbox_path() / "scans" / "_test.txt"
         test_file.write_text("test")
         result = read_file.invoke({"file_path": str(test_file)})
-        assert "test" in result
+        if hasattr(result, "output"):
+            assert "test" in result.output
+        else:
+            assert "test" in str(result)
         # Block outside sandbox
         result = read_file.invoke({"file_path": "/etc/passwd"})
-        assert "Access denied" in result
+        if hasattr(result, "output"):
+            assert "Access denied" in result.output
+        else:
+            assert "Access denied" in str(result)
         test_file.unlink()
         print("✓")
         passed += 1

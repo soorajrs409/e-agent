@@ -9,9 +9,9 @@ Single process only — no tool server needed.
 
 ## Architecture
 
-- `main.py` = CLI loop (logging, input validation)
-- `langchain_agent/agent.py` = LangChain agent with `create_agent` + system prompt
-- `langchain_agent/tools.py` = `@tool` decorated functions
+- `main.py` = CLI loop (logging, input validation, event callbacks)
+- `langchain_agent/agent.py` = LangGraph StateGraph with tool chaining
+- `langchain_agent/tools.py` = `@tool` functions + ToolEvent class
 - `langchain_agent/guardrails.py` = input/target validation
 - `langchain_agent/config.py` = model/host configuration
 
@@ -21,39 +21,93 @@ Single process only — no tool server needed.
 |---------|------|------|
 | Ollama API | 127.0.0.1 | 11434 |
 
+## Tool Chaining (LangGraph)
+
+```
+User Input → StateGraph Agent
+    │
+    ├─→ should_continue() → decides: continue/end
+    ├─→ call_llm() → ChatOllama with tools
+    ├─→ execute_tool_node() → executes tools
+    │       ├─→ emits ToolEvent (started/completed/failed)
+    │       └─→ stores result in state
+    └─→ Max chain: 5 tools enforced
+```
+
+## Tool Events
+
+Live streaming of tool lifecycle:
+
+```python
+class ToolEvent:
+    tool_name: str      # "run_nmap", "read_file"
+    event_type: str   # "started", "completed", "failed"
+    message: str      # error message if failed
+    timestamp: str    # ISO timestamp
+```
+
+Usage in code:
+
+```python
+from langchain_agent.agent import stream_agent, ToolEvent
+
+def cb(event: ToolEvent):
+    print(event.format())  # [*] Running tool...
+
+for chunk in stream_agent("prompt", event_callback=cb):
+    print(chunk)
+```
+
 ## Guardrails
 
-- `langchain_agent/guardrails.py` blocks `run_nmap` targets: `127.0.0.1`, `localhost`, `169.254.169.254`
-- `run_nmap` only allows flags: `-sV`, `-sS`, `-Pn`, `-F`, `-O`
-- Input max 5000 chars; prompt-injection phrases blocked
-
-## Tool Usage Guidelines
-
-The agent has a system prompt that guides when to use tools:
-- Use tools for: file reads, URL fetching, network scans
-- Don't use tools for: greetings, casual conversation, general knowledge
+- `guardrails.py` blocks targets: `127.0.0.1`, `localhost`, `169.254.169.254`
+- `run_nmap` allows flags: `-sV`, `-sS`, `-Pn`, `-F`, `-O`
+- Input max 5000 chars; prompt-injection blocked
+- Max 5 tools per chain
 
 ## Dependencies
 
-Install with:
 ```bash
 uv venv .venv && source .venv/bin/activate && uv pip install -r requirements.txt
 ```
 
 Requires: `langchain`, `langchain-core`, `langchain-ollama`, `langgraph`
 
+## Tool Usage Guidelines
+
+The agent uses LangGraph for multi-tool chains:
+- LLM decides when to call 2+ tools
+- Tools execute sequentially with events
+- Output from one tool feeds to next
+- Error triggers fallback attempt
+- Approval pauses mid-chain
+
 ## Testing
 
-No test framework configured. Verify manually:
-- `curl -s http://127.0.0.1:11434/api/tags` - Ollama health
-- `source .venv/bin/activate && python -c "from langchain_agent import agent_executor; print('OK')"` - imports
+Verify LangGraph:
+```bash
+curl -s http://127.0.0.1:11434/api/tags  # Ollama health
+python -c "from langchain_agent.agent import create_langgraph_agent; print('OK')"  # agent
+python -c "from langchain_agent.tools import ToolEvent; print('OK')"  # events
+```
+
+Test chain:
+```bash
+python -c "
+from langchain_agent.agent import stream_agent, ToolEvent
+events = []
+for chunk in stream_agent('read sandbox/test.txt', event_callback=lambda e: events.append(e.format())):
+    pass
+print(events)
+"
+```
 
 ## OpenSpec Workflow
 
-This repo uses OpenSpec for change management. Skills:
-- `/openspec-propose` - create a new change proposal
-- `/opsx-apply-change` - implement tasks from a change
-- `/opsx-archive-change` - archive completed changes
-- `/opsx-explore` - explore ideas before proposing
+Repository uses OpenSpec:
+- `/openspec-propose` - create change proposal
+- `/opsx-apply` - implement tasks from change
+- `/opsx-archive` - archive completed changes
+- `/opsx-explore` - explore ideas
 
-Changes live in `openspec/changes/`, specs in `openspec/specs/`.
+Changes: `openspec/changes/`, specs: `openspec/specs/`

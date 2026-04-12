@@ -3,6 +3,7 @@ import logging
 import logging.handlers
 
 from langchain_agent.agent import stream_agent
+from langchain_agent.tools import ToolEvent
 from langchain_agent.guardrails import validate_input
 from langchain_agent.config import (
     LOG_FILE,
@@ -180,8 +181,11 @@ def main():
 
         print(f"[*] {AGENT_NAME} -> ", end="", flush=True)
 
+        def handle_tool_event(event: ToolEvent):
+            print(f"\n{event.format()}\n", end="")
+
         try:
-            for chunk in stream_agent(user_input):
+            for chunk in stream_agent(user_input, event_callback=handle_tool_event):
                 print(chunk, end="", flush=True)
             print()
         except KeyboardInterrupt:

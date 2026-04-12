@@ -1,6 +1,6 @@
 # Architecture
 
-This project uses LangChain's ReAct (Reason + Act) agent pattern with Ollama for tool-calling orchestration.
+This project uses LangGraph for tool chaining orchestration with Ollama.
 
 ## High-Level Topology
 
@@ -10,7 +10,8 @@ flowchart LR
     MAIN --> GUARD[guardrails.py]
     MAIN --> AGENT[agent.py]
     AGENT --> LLM[ChatOllama]
-    AGENT --> TOOLS[tools.py]
+    AGENT --> GRAPH[LangGraph StateGraph]
+    GRAPH --> TOOLS[tools.py]
     TOOLS --> RF[read_file]
     TOOLS --> CA[call_api]
     TOOLS --> NM[run_nmap]
@@ -22,85 +23,150 @@ flowchart LR
     subgraph langchain_agent[langchain_agent]
         GUARD
         AGENT
+        GRAPH
         TOOLS
         RL
-        CONFIG
     end
 ```
 
-## Single-Process Architecture
-
-The system runs in a single Python process:
+## LangGraph Tool Chaining Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     main.py (CLI Loop)                       │
 └─────────────────────┬───────────────────────────────────────┘
-                      │
-          ┌───────────┴───────────┐
-          │                       │
-          ▼                       ▼
-   guardrails.py           langchain_agent/
-                                  │
-                     ┌────────────┼────────────┐
-                     │            │            │
-                     ▼            ▼            ▼
-                 config.py   tools.py      agent.py
-                              │            │
-                              ▼            ▼
-                           [tools]    ChatOllama
-                                       + ReAct Agent
+                    │
+        ┌───────────┴───────────┐
+        ▼                   ▼
+   guardrails.py     stream_agent()
+                         │
+                         ▼
+              ┌────────────────────┐
+              │ LangGraph Agent    │
+              ├────────────────────┤
+              │ should_continue() │──→ decides: continue/end
+              │ call_llm()         │──→ calls ChatOllama
+              │ execute_tool_node() │──→ executes tools + emits events
+              └────────────────────┘
+                         │
+              ┌────────────┴────────────┐
+              ▼                         ▼
+         Tool Events          Tool Results
+         (callback)           (to LLM)
 ```
 
-## LangChain Components
+## Tool Chaining Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  User: "scan server and check for vulns"               │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+              ┌───────────────────────┐
+              │  LLM decides: 2 tools  │
+              │  1. run_nmap          │
+              │  2. run_nuclei        │
+              └───────────────────────┘
+                          │
+          ┌───────────────┼───────────────┐
+          ▼               ▼               ▼
+    Tool 1 runs       Error?          Approval?
+    + events        ↓↓                   ↓↓
+    output ──►   LLM decides    Pause until
+    to LLM       alternate      /approve X
+    ↓↓          or stop
+    Tool 2
+    ...
+```
+
+## Agent State (TypedDict)
+
+```python
+class AgentState(TypedDict):
+    messages: list[BaseMessage]      # conversation history
+    tool_results: list[str]        # outputs from each tool
+    chain_depth: int             # tools executed so far
+    pending_approval: dict | None  # approval state if paused
+    retry_count: int            # error recovery attempts
+    last_error: str | None     # last error for fallback
+```
+
+## Key Components
 
 ### ChatOllama
 - Connects to local Ollama instance
 - Handles chat completions with streaming support
 
-### create_react_agent
-- LangGraph's pre-built ReAct agent
-- Handles: think → act → observe → repeat loop
-- Built-in tool calling with structured output
+### LangGraph StateGraph
+- Tool calling with explicit state management
+- Supports: think → act → observe → repeat loop
+- Max chain length: 5 tools (enforced)
+- Error recovery: 1 retry per tool with fallback
+
+### ToolEvent System
+```python
+class ToolEvent:
+    tool_name: str      # which tool
+    event_type: str    # "started", "completed", "failed"
+    message: str     # error message if failed
+    timestamp: str   # ISO timestamp
+```
 
 ### @tool Decorated Functions
 - Auto-generate JSON schemas for prompts
-- Direct Python execution (no HTTP overhead)
+- Return ToolOutput pydantic model
 
-## Request Lifecycle
+## Request Lifecycle with Tool Chaining
 
 ```mermaid
 sequenceDiagram
     participant User
     participant Main as main.py
-    participant Guard as guardrails.py
-    participant Agent as agent.py
+    participant Agent as LangGraph Agent
     participant LLM as ChatOllama
     participant Tool as @tool function
 
-    User->>Main: prompt
-    Main->>Main: log USER entry
-    Main->>Guard: validate_input()
-
-    alt blocked
-        Guard-->>Main: False + reason
-        Main-->>User: guard block message
-    else allowed
-        Guard-->>Main: True
-        Main->>Agent: invoke_agent(prompt)
-        Agent->>LLM: chat completion
-
-        alt tool needed
-            LLM-->>Agent: tool call request
-            Agent->>Tool: execute tool
-            Tool-->>Agent: tool result
-            Agent->>LLM: continue with result
-        end
-
-        LLM-->>Agent: final response
-        Agent-->>Main: response text
-        Main-->>User: display response
+    User->>Main: "scan 1.2.3.4 and check vulns"
+    Main->>Agent: stream_agent(prompt, event_callback)
+    
+    rect rgb(240, 248, 255)
+        Note over Agent,LLM: Chain iteration 1
+        Agent->>LLM: chat completion + tools
+        LLM-->>Agent: tool_calls = [run_nmap]
+        Note over Agent: should_continue() → "continue"
+        Agent->>Tool: execute run_nmap
+        Tool-->>Agent: tool_result
+        Note over Agent: emit ToolEvent("started")
+        Note over Agent: emit ToolEvent("completed")
     end
+    
+    rect rgb(240, 248, 255)
+        Note over Agent,LLM: Chain iteration 2
+        Agent->>LLM: continue with result
+        LLM-->>Agent: tool_calls = [run_nuclei]
+        Note over Agent: should_continue() → "continue"
+        Agent->>Tool: execute run_nuclei
+        Tool-->>Agent: tool_result
+        Note over Agent: emit ToolEvent("started")
+    end
+    
+    rect rgb(255, 240, 240)
+        Note over Agent: Approval needed
+        Note over Agent: pending_approval set
+        Note over Agent: should_continue() → "end"
+        Agent-->>Main: approval request
+        Main-->>User: Use /approve X
+    end
+    
+    rect rgb(240, 255, 240)
+        Note over User,Main: On approval
+        User->>Main: /approve X
+        Main->>Agent: execute approved tool
+    end
+    
+    Agent-->>Main: final response
+    Main-->>User: display + tool events
 ```
 
 ## Module Responsibilities
@@ -108,88 +174,83 @@ sequenceDiagram
 ### main.py
 - CLI loop with input/output
 - Logging to `logs/agent.log`
-- Delegates to LangChain agent
+- Delegates to LangGraph agent
+- Event callback for tool lifecycle display
 
 ### langchain_agent/agent.py
 - `ChatOllama` initialization
-- `create_react_agent` setup
-- `invoke_agent()` function
-- Error handling for Ollama connection
+- `create_langgraph_agent()` factory
+- `stream_agent(event_callback)` with events
+- `invoke_agent()` for blocking calls
+- Tool execution state management
+- Error recovery logic
 
 ### langchain_agent/tools.py
 - `@tool` decorated functions
-- `read_file`: file system access (sandbox-constrained)
-- `call_api`: HTTP GET requests (URL validation)
-- `run_nmap`: network scanning
-- `run_nuclei`: vulnerability scanning
+- `ToolEvent` class for lifecycle events
+- `set_tool_event_callback()` registration
+- `get_tool_function()` lookup
 
 ### langchain_agent/guardrails.py
 - `validate_input()`: length + injection detection
-- `validate_nmap_target()` / `validate_nuclei_target()`: blocks localhost/127.0.0.1/metadata IP
-- `validate_url()`: blocks unsafe URL schemes and internal targets
-
-### langchain_agent/rate_limiter.py
-- Per-tool rate limiting (configurable per-minute limits)
+- Target blocking (localhost, metadata IPs)
 
 ### langchain_agent/approval_queue.py
-- Approval request management (pending, approved, denied, expired)
-- Auto-approve workflow
+- Approval request management
+- `chain_state` for resume after approval
+
+### langchain_agent/rate_limiter.py
+- Per-tool rate limiting
 
 ### langchain_agent/config.py
-- `MODEL_NAME`: Ollama model (default: "llama3.1")
-- `OLLAMA_HOST`: Ollama API URL
-- `AGENT_NAME`: display name
-- `LOG_FILE`: log file path
-- Guardrails configuration (from config.yaml)
+- Model/host configuration
+- Guardrails from config.yaml
 
-## Tool Schemas
+## Tool Output Format
 
-LangChain auto-generates JSON schemas from `@tool` decorators:
+All tools return standardized `ToolOutput`:
 
 ```python
-@tool
-def run_nmap(target: str, options: str = "-sV") -> str:
-    """Run network scan..."""
-    ...
-
-# Generates:
-{
-  "name": "run_nmap",
-  "description": "Run network scan...",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "target": {"type": "string"},
-      "options": {"type": "string", "default": "-sV"}
-    },
-    "required": ["target"]
-  }
-}
+class ToolOutput(BaseModel):
+    status: str        # "success", "error", "blocked"
+    tool: str          # tool name
+    output: str      # result message
+    saved_to: str | None  # file path if saved
 ```
 
 ## Security
 
-- Input: max 5000 chars (configurable), prompt injection detection
-- Tools: nmap/nuclei target blocking (localhost, 127.0.0.1, 169.254.169.254) - configurable via config.yaml
-- Tools: nmap flag allowlist (`-sV`, `-sS`, `-Pn`, `-F`, `-O`) - configurable via config.yaml
-- call_api: URL scheme validation (only http/https), blocks internal targets
-- Rate limiting: configurable per-tool, per-minute limits
+- Input: max 5000 chars, prompt injection detection
+- nmap/nuclei: target blocking via config
+- nmap: flag allowlist
+- call_api: URL scheme + internal targeting blocks
+- Rate limiting: per-tool limits
+- Max chain: 5 tools to prevent runaway
 
-## Tool Output Format
+## Live Streaming
 
-All tools return standardized `ToolOutput` pydantic model:
+Tool events stream during execution:
 
-```python
-class ToolOutput(BaseModel):
-    status: str       # "success", "error", "blocked"
-    tool: str         # tool name
-    output: str      # result message
-    saved_to: str | None  # file path if saved
+```
+[*] Running run_nmap...
+[Port scan results...]
+[✓] run_nmap completed
+[*] Running run_nuclei...
+[vuln results...]
+[✓] run_nuclei completed
+```
+
+Approval pauses execution:
+```
+[*] Running run_nmap...
+[✓] run_nmap completed
+[approval_required] Use /approve abc123
 ```
 
 ## Future Extensibility
 
 The architecture supports:
-- Adding more tools (add `@tool` decorated function)
-- Conversation memory (add `ChatMessageHistory`)
-- RAG capabilities (add vector store integration)
+- Adding more tools
+- Custom chain termination conditions
+- Parallel tool execution (future)
+- Conversation memory

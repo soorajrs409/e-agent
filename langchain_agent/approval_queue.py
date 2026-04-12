@@ -11,13 +11,14 @@ class ApprovalStatus(Enum):
 
 
 class ApprovalRequest:
-    def __init__(self, tool: str, args: dict):
+    def __init__(self, tool: str, args: dict, chain_state: dict = None):
         self.id = str(uuid.uuid4())[:8]
         self.tool = tool
         self.args = args
         self.created_at = datetime.now()
         self.expires_at = self.created_at + timedelta(minutes=5)
         self.status = ApprovalStatus.PENDING
+        self.chain_state = chain_state or {}
 
     def is_expired(self) -> bool:
         return datetime.now() > self.expires_at
@@ -38,11 +39,11 @@ class ApprovalQueue:
         self._queue: dict[str, ApprovalRequest] = {}
         self._auto_approved_tools: set[str] = set()
 
-    def add_request(self, tool: str, args: dict) -> str:
+    def add_request(self, tool: str, args: dict, chain_state: dict = None) -> str:
         if tool in self._auto_approved_tools:
             return "auto_approved"
 
-        request = ApprovalRequest(tool, args)
+        request = ApprovalRequest(tool, args, chain_state)
         self._queue[request.id] = request
         return request.id
 
@@ -58,10 +59,31 @@ class ApprovalQueue:
 
         tool = request.tool
         args = request.args
+        chain_state = request.chain_state
 
         del self._queue[request_id]
 
-        return {"status": ApprovalStatus.APPROVED, "tool": tool, "args": args}
+        return {
+            "status": ApprovalStatus.APPROVED,
+            "tool": tool,
+            "args": args,
+            "chain_state": chain_state,
+        }
+
+    def get_request(self, request_id: str) -> dict | None:
+        request = self._queue.get(request_id)
+        if not request:
+            return None
+
+        return {
+            "id": request.id,
+            "tool": request.tool,
+            "args": request.args,
+            "chain_state": request.chain_state,
+            "created_at": request.created_at.isoformat(),
+            "expires_at": request.expires_at.isoformat(),
+            "status": request.status.value,
+        }
 
     def deny(self, request_id: str) -> dict:
         request = self._queue.get(request_id)

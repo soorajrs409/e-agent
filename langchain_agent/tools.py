@@ -33,6 +33,36 @@ class ToolOutput(BaseModel):
     saved_to: str | None = None
 
 
+class ToolEvent:
+    def __init__(self, tool_name: str, event_type: str, message: str = ""):
+        self.tool_name = tool_name
+        self.event_type = event_type  # "started", "completed", "failed"
+        self.message = message
+        self.timestamp = datetime.now().isoformat()
+
+    def format(self) -> str:
+        if self.event_type == "started":
+            return f"[*] Running {self.tool_name}..."
+        elif self.event_type == "completed":
+            return f"[✓] {self.tool_name} completed"
+        else:  # failed
+            return f"[✗] {self.tool_name} failed: {self.message}"
+
+
+_tool_event_callback = None
+
+
+def set_tool_event_callback(callback):
+    global _tool_event_callback
+    _tool_event_callback = callback
+
+
+def emit_tool_event(tool_name: str, event_type: str, message: str = ""):
+    if _tool_event_callback:
+        event = ToolEvent(tool_name, event_type, message)
+        _tool_event_callback(event)
+
+
 @tool
 def read_file(file_path: str) -> ToolOutput:
     """Read file contents from disk within sandbox."""

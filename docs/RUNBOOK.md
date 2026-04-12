@@ -1,6 +1,6 @@
 # Runbook
 
-Operational guide for running and troubleshooting the local CLI agent.
+Operational guide for running and troubleshooting the e-agent.
 
 ## Startup Order
 
@@ -41,15 +41,69 @@ Expected: JSON with locally available model tags.
 
 ```bash
 source .venv/bin/activate
-python -c "from langchain_agent import agent_executor; print('OK')"
+python -c "from langchain_agent import agent; print('OK')"
 ```
 
-## Common Failures
+### LangGraph agent creation
 
-### `Connection refused` to Ollama
+```bash
+source .venv/bin/activate
+python -c "from langchain_agent.agent import create_langgraph_agent; print('OK')"
+```
 
-- confirm `ollama serve` is running
-- verify `langchain_agent/config.py` has `OLLAMA_HOST = "http://127.0.0.1:11434"`
+## Tool Chaining
+
+### Approving tools mid-chain
+
+When the agent runs multiple tools and one requires approval:
+
+```
+[*] Running run_nmap...
+[✓] run_nmap completed
+[approval_required] Use /approve abc123 to execute this command.
+```
+
+Approve and execution continues:
+
+```bash
+/approve abc123
+```
+
+### Checking pending approvals
+
+```bash
+# Check what approvals are pending
+curl -s http://127.0.0.1:11434  # Still running
+```
+
+### Auto-approve all requests
+
+For testing, auto-approve a tool:
+
+```bash
+/approve-all run_nmap
+/approve-all run_nuclei
+```
+
+This allows all requests of that type without manual approval.
+
+## Live Tool Events
+
+The agent streams tool lifecycle events:
+
+```
+[*] Running read_file...        # Tool started
+[✓] read_file completed      # Success
+[*] Running run_nmap...        # Next tool started
+[✗] run_nmap failed: <error>  # Failure
+```
+
+## Troubleshooting
+
+### Connection refused to Ollama
+
+- Confirm `ollama serve` is running
+- Verify `langchain_agent/config.py` has `OLLAMA_HOST = "http://127.0.0.1:11434"`
 - CLI prints `[OLLAMA ERROR]` on connection failure
 
 ### Agent doesn't use tools
@@ -62,21 +116,40 @@ python -c "from langchain_agent import agent_executor; print('OK')"
 - Check if input exceeds `guardrails.max_input_length` in config.yaml
 - Check for blocked prompt injection phrases
 
-### `run_nmap` blocked
+### Tool blocked
 
 - Target contains blocked address from `guardrails.blocked_targets`
 - Options include flag outside `guardrails.nmap.allowed_flags`
-
-### `call_api` blocked
-
-Possible causes:
-- URL scheme not http/https
-- URL targets internal address (localhost, 127.x.x.x)
+- Check error message for specific reason
 
 ### Rate limited
 
-Possible causes:
 - Exceeded `guardrails.rate_limit.max_per_minute` for that tool
+
+### Chain too long
+
+If chain exceeds 5 tools:
+
+```
+[chain truncated at 5 tools - re-run for remaining steps]
+```
+
+### Approval expired
+
+Approval requests expire after 5 minutes:
+
+```
+Request abc123 has expired. Please re-issue the command.
+```
+
+### Error during chain
+
+On tool error, the agent tries alternate parameters once:
+
+```
+[error] Error: Disallowed switch '-T4'
+# Agent might retry with different flags
+```
 
 ## Logs
 
@@ -85,8 +158,14 @@ Possible causes:
 - path: `logs/agent.log`
 - logs user messages with timestamp
 
+### Scan outputs
+
+- path: `sandbox/scans/nmap-*.txt`
+- path: `sandbox/scans/nuclei-*.txt`
+
 ## Configuration
-Configuration is in `config.yaml`:
+
+Configuration in `config.yaml`:
 
 ```yaml
 model:
@@ -105,11 +184,11 @@ tools:
   auto: [read_file, call_api]
   approval_required: [run_nmap, run_nuclei]
   call_api:
-    timeout: 20  # HTTP request timeout in seconds
+    timeout: 20
   nmap:
-    timeout: 600  # nmap scan timeout in seconds
+    timeout: 600
   nuclei:
-    timeout: 600  # nuclei scan timeout in seconds
+    timeout: 600
 
 guardrails:
   max_input_length: 5000
@@ -124,23 +203,31 @@ guardrails:
     max_per_minute: 30
 
 logging:
-  rotation_days: 7    # Log rotation interval
-  backup_count: 7    # Number of backup logs
+  rotation_days: 7
+  backup_count: 7
 ```
 
-## Troubleshooting
+## Chain State Debugging
 
-### Input rejected
-- Check if input exceeds `guardrails.max_input_length` in config.yaml
-- Check for blocked prompt injection phrases
+To see chain state during execution:
 
-### `run_nmap` blocked
-- Target contains blocked address from `guardrails.blocked_targets`
-- Options include flag outside `guardrails.nmap.allowed_flags`
+```python
+from langchain_agent.agent import stream_agent, ToolEvent
 
-### `call_api` blocked
-- URL scheme not http/https
-- URL targets internal address (localhost, 127.x.x.x)
+def debug_cb(e: ToolEvent):
+    print(f"EVENT: {e.format()}")
 
-### Rate limited
-- Exceeded `guardrails.rate_limit.max_per_minute` for tool
+# Run with debug output
+for chunk in stream_agent("your prompt", event_callback=debug_cb):
+    print(chunk)
+```
+
+## Commands Summary
+
+| Command | Description |
+|---------|-------------|
+| `python main.py` | Start agent |
+| `exit` | Quit |
+| `/approve <id>` | Approve pending request |
+| `/deny <id>` | Deny pending request |
+| `/approve-all <tool>` | Auto-approve all of tool type |

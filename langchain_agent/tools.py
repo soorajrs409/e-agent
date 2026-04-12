@@ -9,8 +9,9 @@ from pydantic import BaseModel
 import os
 
 from langchain_agent.guardrails import validate_nmap_target, validate_nuclei_target
-from langchain_agent.config import get_sandbox_path, TOOLS_APPROVAL_REQUIRED
+from langchain_agent.config import get_sandbox_path
 from langchain_agent.approval_queue import get_approval_queue
+from langchain_agent.rate_limiter import get_rate_limiter
 
 
 class ApprovalRequired(BaseModel):
@@ -28,30 +29,83 @@ class ToolOutput(BaseModel):
 
 
 @tool
-def read_file(file_path: str) -> Union[str, ToolOutput]:
+def read_file(file_path: str) -> ToolOutput:
     """Read file contents from disk within sandbox."""
+    rate_limiter = get_rate_limiter()
+    allowed, reason = rate_limiter.is_allowed("read_file")
+    if not allowed:
+        return ToolOutput(
+            status="blocked",
+            tool="read_file",
+            output=reason,
+            saved_to=None,
+        )
+
     try:
         sandbox = get_sandbox_path()
         resolved = Path(file_path).resolve()
 
         if not str(resolved).startswith(str(sandbox)):
-            return f"Access denied: path outside sandbox ({sandbox})"
+            return ToolOutput(
+                status="blocked",
+                tool="read_file",
+                output=f"Access denied: path outside sandbox ({sandbox})",
+                saved_to=None,
+            )
 
         if not resolved.exists():
-            return f"Error: file not found: {file_path}"
+            return ToolOutput(
+                status="error",
+                tool="read_file",
+                output=f"Error: file not found: {file_path}",
+                saved_to=None,
+            )
 
-        return resolved.read_text()
+        content = resolved.read_text()
+        return ToolOutput(
+            status="success",
+            tool="read_file",
+            output=content,
+            saved_to=None,
+        )
     except Exception as e:
-        return f"Error reading file: {str(e)}"
+        return ToolOutput(
+            status="error",
+            tool="read_file",
+            output=f"Error reading file: {str(e)}",
+            saved_to=None,
+        )
 
 
 @tool
-def call_api(url: str) -> Union[str, ToolOutput]:
+def call_api(url: str) -> ToolOutput:
     """Make HTTP GET request to a URL."""
+    from langchain_agent.guardrails import validate_url
+
+    rate_limiter = get_rate_limiter()
+    allowed, reason = rate_limiter.is_allowed("call_api")
+    if not allowed:
+        return ToolOutput(
+            status="blocked",
+            tool="call_api",
+            output=reason,
+            saved_to=None,
+        )
+
+    allowed, reason = validate_url(url)
+    if not allowed:
+        return ToolOutput(
+            status="blocked",
+            tool="call_api",
+            output=reason,
+            saved_to=None,
+        )
+
     try:
         r = requests.get(url, timeout=20)
         content = r.text
 
+        saved_path = None
         if url.startswith("http://") or url.startswith("https://"):
             sandbox = get_sandbox_path()
             downloads_dir = sandbox / "downloads"
@@ -63,27 +117,57 @@ def call_api(url: str) -> Union[str, ToolOutput]:
 
             file_path = downloads_dir / filename
             file_path.write_text(content)
+            saved_path = str(file_path)
 
-        return content
+        return ToolOutput(
+            status="success",
+            tool="call_api",
+            output=content,
+            saved_to=saved_path,
+        )
     except Exception as e:
-        return f"Error fetching URL: {str(e)}"
+        return ToolOutput(
+            status="error",
+            tool="call_api",
+            output=f"Error fetching URL: {str(e)}",
+            saved_to=None,
+        )
 
 
 @tool
-def run_nmap(
-    target: str, options: str = "-sV"
-) -> Union[ApprovalRequired, str, ToolOutput]:
+def run_nmap(target: str, options: str = "-sV") -> Union[ApprovalRequired, ToolOutput]:
     """Run network scan to find open ports/services."""
+    from langchain_agent.config import GUARDRAILS_NMAP_ALLOWED_FLAGS
+
+    rate_limiter = get_rate_limiter()
+    allowed, reason = rate_limiter.is_allowed("run_nmap")
+    if not allowed:
+        return ToolOutput(
+            status="blocked",
+            tool="run_nmap",
+            output=reason,
+            saved_to=None,
+        )
+
     allowed, reason = validate_nmap_target(target)
     if not allowed:
-        return f"Guard blocked: {reason}"
+        return ToolOutput(
+            status="blocked",
+            tool="run_nmap",
+            output=reason,
+            saved_to=None,
+        )
 
-    allowed_flags = ["-sV", "-sS", "-Pn", "-F", "-O"]
     option_list = shlex.split(options)
 
     for opt in option_list:
-        if opt not in allowed_flags:
-            return f"Error: Disallowed switch '{opt}'"
+        if opt not in GUARDRAILS_NMAP_ALLOWED_FLAGS:
+            return ToolOutput(
+                status="blocked",
+                tool="run_nmap",
+                output=f"Error: Disallowed switch '{opt}'",
+                saved_to=None,
+            )
 
     queue = get_approval_queue()
     if queue.is_auto_approved("run_nmap"):
@@ -92,7 +176,6 @@ def run_nmap(
     request_id = queue.add_request(
         "run_nmap",
         {"target": target, "options": options},
-        lambda: _execute_nmap(target, options),
     )
 
     if request_id == "auto_approved":
@@ -106,14 +189,19 @@ def run_nmap(
     )
 
 
-def _execute_nmap(target: str, options: str) -> str:
+def _execute_nmap(target: str, options: str) -> ToolOutput:
     """Execute nmap scan."""
     try:
         cmd = ["nmap"] + shlex.split(options) + [target]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
         if result.returncode != 0:
-            return f"Nmap error: {result.stderr}"
+            return ToolOutput(
+                status="error",
+                tool="run_nmap",
+                output=f"Nmap error: {result.stderr}",
+                saved_to=None,
+            )
 
         output = result.stdout
 
@@ -126,12 +214,27 @@ def _execute_nmap(target: str, options: str) -> str:
         file_path = scans_dir / f"nmap-{safe_target}-{timestamp}.txt"
         file_path.write_text(output)
 
-        return f"{output}\n\n[Saved to: {file_path}]"
+        return ToolOutput(
+            status="success",
+            tool="run_nmap",
+            output=f"{output}\n\n[Saved to: {file_path}]",
+            saved_to=str(file_path),
+        )
 
     except subprocess.TimeoutExpired:
-        return "Error: Scan timed out"
+        return ToolOutput(
+            status="error",
+            tool="run_nmap",
+            output="Error: Scan timed out",
+            saved_to=None,
+        )
     except Exception as e:
-        return f"Error: {str(e)}"
+        return ToolOutput(
+            status="error",
+            tool="run_nmap",
+            output=f"Error: {str(e)}",
+            saved_to=None,
+        )
 
 
 @tool
@@ -139,6 +242,16 @@ def run_nuclei(
     target: str, options: str = "-severity critical,high,medium,low"
 ) -> Union[ApprovalRequired, ToolOutput]:
     """Run vulnerability scan using nuclei."""
+    rate_limiter = get_rate_limiter()
+    allowed, reason = rate_limiter.is_allowed("run_nuclei")
+    if not allowed:
+        return ToolOutput(
+            status="blocked",
+            tool="run_nuclei",
+            output=reason,
+            saved_to=None,
+        )
+
     allowed, reason = validate_nuclei_target(target)
     if not allowed:
         return ToolOutput(
@@ -155,7 +268,6 @@ def run_nuclei(
     request_id = queue.add_request(
         "run_nuclei",
         {"target": target, "options": options},
-        lambda: _execute_nuclei(target, options),
     )
 
     if request_id == "auto_approved":
@@ -170,7 +282,7 @@ def run_nuclei(
 
 
 def _execute_nuclei(target: str, options: str) -> ToolOutput:
-    """Execute nuclei scan (runs in background)."""
+    """Execute nuclei scan synchronously."""
     search_paths = os.environ.get("PATH", "").split(":") + [
         "/usr/local/bin",
         "/usr/bin",
@@ -223,20 +335,40 @@ def _execute_nuclei(target: str, options: str) -> ToolOutput:
             str(output_file),
         ] + shlex.split(options)
 
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=600, env=env
         )
+
+        if result.returncode != 0 and result.returncode != 1:
+            return ToolOutput(
+                status="error",
+                tool="run_nuclei",
+                output=f"Error: {result.stderr}",
+                saved_to=None,
+            )
+
+        output = output_file.read_text() if output_file.exists() else result.stdout
 
         return ToolOutput(
             status="success",
             tool="run_nuclei",
-            output=f"Nuclei scan started (PID: {proc.pid}). Check results in a few minutes at: {output_file}",
+            output=f"Nuclei scan complete. Results saved to: {output_file}\n\n{output}",
             saved_to=str(output_file),
         )
 
+    except subprocess.TimeoutExpired:
+        return ToolOutput(
+            status="error",
+            tool="run_nuclei",
+            output="Error: Scan timed out",
+            saved_to=None,
+        )
     except Exception as e:
         return ToolOutput(
-            status="error", tool="run_nuclei", output=f"Error: {str(e)}", saved_to=None
+            status="error",
+            tool="run_nuclei",
+            output=f"Error: {str(e)}",
+            saved_to=None,
         )
 
 

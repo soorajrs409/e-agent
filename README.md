@@ -58,8 +58,9 @@ flowchart LR
 │   ├── agent.py           # LangChain ReAct agent setup
 │   ├── config.py          # Configuration loader
 │   ├── tools.py           # @tool decorated functions
-│   ├── guardrails.py      # Input/target validation
-│   └── approval_queue.py  # Approval system
+│   ├── guardrails.py      # Input/target/URL validation
+│   ├── approval_queue.py  # Approval system
+│   └── rate_limiter.py  # Rate limiting
 └── docs/
     ├── ARCHITECTURE.md
     └── RUNBOOK.md
@@ -141,6 +142,23 @@ tools:
     - run_nmap
     - run_nuclei
 
+guardrails:
+  max_input_length: 5000
+  blocked_targets:
+    - "127.0.0.1"
+    - "localhost"
+    - "169.254.169.254"
+  nmap:
+    allowed_flags:
+      - "-sV"
+      - "-sS"
+      - "-Pn"
+      - "-F"
+      - "-O"
+  rate_limit:
+    enabled: true
+    max_per_minute: 30
+
 approval:
   timeout_minutes: 5
   allow_approve_all: true
@@ -176,7 +194,7 @@ Use /approve abc12345 to execute this command.
 
 [+] you -> /approve abc12345
 Executing run_nuclei...
-Nuclei scan started (PID: 12345). Check results in a few minutes at: sandbox/scans/...
+Nuclei scan complete. Results saved to: sandbox/scans/...
 ```
 
 ### Approve All
@@ -188,12 +206,12 @@ For convenience during bug bounty hunting, you can auto-approve all requests for
 All nuclei commands will now execute without approval for this session.
 ```
 
-### Background Execution
+### Synchronous Execution
 
-Nuclei scans run in the background. After approval:
-- The scan starts immediately in background
+Nuclei scans run synchronously (wait for completion). After approval:
+- The scan executes immediately and waits for results
 - Results are saved to `sandbox/scans/`
-- Use `read_file` to view results after scan completes
+- Use `read_file` to view results
 
 ```
 [+] you -> read /path/to/sandbox/scans/nuclei-...
@@ -210,13 +228,15 @@ All file operations are sandboxed to prevent access to sensitive files:
 ## Guardrails
 
 ### Input validation
-- Rejects input > 5000 characters
+- Rejects input > `guardrails.max_input_length` characters (configurable)
 - Blocks prompt injection phrases
 
 ### Tool restrictions
-- `run_nmap`, `run_nuclei` block targets: `localhost`, `127.0.0.1`, `169.254.169.254`
-- `run_nmap` only allows flags: `-sV`, `-sS`, `-Pn`, `-F`, `-O`
+- `run_nmap`, `run_nuclei` block targets from `guardrails.blocked_targets` (configurable)
+- `run_nmap` only allows flags from `guardrails.nmap.allowed_flags` (configurable)
+- `call_api` only allows http/https schemes, blocks internal URLs
 - `read_file` restricted to sandbox directory
+- `rate_limiter`: configurable per-tool limits
 
 ## Logging
 

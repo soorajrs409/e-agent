@@ -32,6 +32,28 @@ tools:
     - run_nmap
     - run_nuclei
 
+# Guardrails Settings
+guardrails:
+  # Maximum input length in characters
+  max_input_length: 5000
+  # Targets that are blocked from scanning
+  blocked_targets:
+    - "127.0.0.1"
+    - "localhost"
+    - "169.254.169.254"
+  # nmap-specific settings
+  nmap:
+    allowed_flags:
+      - "-sV"
+      - "-sS"
+      - "-Pn"
+      - "-F"
+      - "-O"
+  # Rate limiting settings
+  rate_limit:
+    enabled: true
+    max_per_minute: 30
+
 # Approval System Settings
 approval:
   # Timeout in minutes before pending approval expires

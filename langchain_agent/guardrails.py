@@ -1,7 +1,10 @@
 import re
+from urllib.parse import urlparse
 
-BLOCKED_TARGETS = ["127.0.0.1", "localhost", "169.254.169.254"]
-MAX_INPUT_LENGTH = 5000
+from langchain_agent.config import (
+    GUARDRAILS_MAX_INPUT_LENGTH,
+    GUARDRAILS_BLOCKED_TARGETS,
+)
 
 INJECTION_PATTERNS = [
     r"ignore previous instructions",
@@ -27,13 +30,13 @@ def validate_input(user_input: str) -> tuple[bool, str]:
     Returns:
         Tuple of (is_valid, reason_if_invalid)
     """
-    if len(user_input) > MAX_INPUT_LENGTH:
-        return False, f"Input exceeds {MAX_INPUT_LENGTH} character limit"
+    if len(user_input) > GUARDRAILS_MAX_INPUT_LENGTH:
+        return False, f"Input exceeds {GUARDRAILS_MAX_INPUT_LENGTH} character limit"
 
     input_lower = user_input.lower()
     for pattern in INJECTION_PATTERNS:
         if re.search(pattern, input_lower, re.IGNORECASE):
-            return False, f"Blocked prompt injection pattern detected"
+            return False, "Blocked prompt injection pattern detected"
 
     return True, ""
 
@@ -49,7 +52,7 @@ def validate_nmap_target(target: str) -> tuple[bool, str]:
     """
     target_lower = target.lower()
 
-    for blocked in BLOCKED_TARGETS:
+    for blocked in GUARDRAILS_BLOCKED_TARGETS:
         if blocked in target_lower:
             return False, f"Blocked target: '{blocked}' is not allowed"
 
@@ -67,8 +70,49 @@ def validate_nuclei_target(target: str) -> tuple[bool, str]:
     """
     target_lower = target.lower()
 
-    for blocked in BLOCKED_TARGETS:
+    for blocked in GUARDRAILS_BLOCKED_TARGETS:
         if blocked in target_lower:
             return False, f"Blocked target: '{blocked}' is not allowed"
+
+    return True, ""
+
+
+def validate_url(url: str) -> tuple[bool, str]:
+    """Validate URL for HTTP requests.
+
+    Args:
+        url: The URL to validate
+
+    Returns:
+        Tuple of (is_valid, reason_if_invalid)
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False, "Invalid URL format"
+
+    if parsed.scheme not in ("http", "https"):
+        return (
+            False,
+            f"URL scheme '{parsed.scheme}' is not allowed. Use http:// or https://",
+        )
+
+    if parsed.scheme == "http":
+        host = parsed.hostname or ""
+        if (
+            host.startswith("127.")
+            or host == "localhost"
+            or host.startswith("169.254.")
+        ):
+            return False, f"Internal URL target '{host}' is not allowed"
+
+    if parsed.scheme == "https":
+        host = parsed.hostname or ""
+        if (
+            host.startswith("127.")
+            or host == "localhost"
+            or host.startswith("169.254.")
+        ):
+            return False, f"Internal URL target '{host}' is not allowed"
 
     return True, ""

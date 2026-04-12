@@ -1,7 +1,6 @@
 import uuid
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Callable
 
 
 class ApprovalStatus(Enum):
@@ -12,11 +11,10 @@ class ApprovalStatus(Enum):
 
 
 class ApprovalRequest:
-    def __init__(self, tool: str, args: dict, callback: Callable = None):
+    def __init__(self, tool: str, args: dict):
         self.id = str(uuid.uuid4())[:8]
         self.tool = tool
         self.args = args
-        self.callback = callback
         self.created_at = datetime.now()
         self.expires_at = self.created_at + timedelta(minutes=5)
         self.status = ApprovalStatus.PENDING
@@ -39,15 +37,12 @@ class ApprovalQueue:
     def __init__(self):
         self._queue: dict[str, ApprovalRequest] = {}
         self._auto_approved_tools: set[str] = set()
-        self._cleanup_callbacks: dict[str, Callable] = {}
 
-    def add_request(self, tool: str, args: dict, callback: Callable = None) -> str:
+    def add_request(self, tool: str, args: dict) -> str:
         if tool in self._auto_approved_tools:
-            if callback:
-                callback()
-            return f"auto_approved"
+            return "auto_approved"
 
-        request = ApprovalRequest(tool, args, callback)
+        request = ApprovalRequest(tool, args)
         self._queue[request.id] = request
         return request.id
 
@@ -60,9 +55,6 @@ class ApprovalQueue:
         if request.is_expired():
             del self._queue[request_id]
             return {"status": ApprovalStatus.EXPIRED, "reason": "expired"}
-
-        if request.callback:
-            request.callback()
 
         tool = request.tool
         args = request.args

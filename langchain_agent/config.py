@@ -1,4 +1,3 @@
-import os
 import yaml
 from pathlib import Path
 
@@ -33,6 +32,24 @@ TOOLS_APPROVAL_REQUIRED = _config.get("tools", {}).get(
 APPROVAL_TIMEOUT_MINUTES = _config.get("approval", {}).get("timeout_minutes", 5)
 APPROVAL_ALLOW_APPROVE_ALL = _config.get("approval", {}).get("allow_approve_all", True)
 
+GUARDRAILS_MAX_INPUT_LENGTH = _config.get("guardrails", {}).get(
+    "max_input_length", 5000
+)
+GUARDRAILS_BLOCKED_TARGETS = _config.get("guardrails", {}).get(
+    "blocked_targets", ["127.0.0.1", "localhost", "169.254.169.254"]
+)
+GUARDRAILS_NMAP_ALLOWED_FLAGS = (
+    _config.get("guardrails", {})
+    .get("nmap", {})
+    .get("allowed_flags", ["-sV", "-sS", "-Pn", "-F", "-O"])
+)
+GUARDRAILS_RATE_LIMIT_ENABLED = (
+    _config.get("guardrails", {}).get("rate_limit", {}).get("enabled", True)
+)
+GUARDRAILS_RATE_LIMIT_MAX_PER_MINUTE = (
+    _config.get("guardrails", {}).get("rate_limit", {}).get("max_per_minute", 30)
+)
+
 
 def get_sandbox_path():
     return Path(SANDBOX_PATH).resolve()
@@ -48,3 +65,13 @@ def get_tool_category(tool_name: str) -> str:
 
 def is_tool_auto(tool_name: str) -> bool:
     return get_tool_category(tool_name) == "auto"
+
+
+def get_guardrails_config() -> dict:
+    return {
+        "max_input_length": GUARDRAILS_MAX_INPUT_LENGTH,
+        "blocked_targets": GUARDRAILS_BLOCKED_TARGETS,
+        "nmap_allowed_flags": GUARDRAILS_NMAP_ALLOWED_FLAGS,
+        "rate_limit_enabled": GUARDRAILS_RATE_LIMIT_ENABLED,
+        "rate_limit_max_per_minute": GUARDRAILS_RATE_LIMIT_MAX_PER_MINUTE,
+    }

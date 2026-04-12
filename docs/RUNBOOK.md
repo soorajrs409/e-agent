@@ -59,15 +59,24 @@ python -c "from langchain_agent import agent_executor; print('OK')"
 
 ### Input rejected
 
-- Check if input exceeds 5000 characters
+- Check if input exceeds `guardrails.max_input_length` in config.yaml
 - Check for blocked prompt injection phrases
 
 ### `run_nmap` blocked
 
-Possible causes:
+- Target contains blocked address from `guardrails.blocked_targets`
+- Options include flag outside `guardrails.nmap.allowed_flags`
 
-- target contains `127.0.0.1`, `localhost`, or `169.254.169.254`
-- options include a flag outside allowlist: `-sV`, `-sS`, `-Pn`, `-F`, `-O`
+### `call_api` blocked
+
+Possible causes:
+- URL scheme not http/https
+- URL targets internal address (localhost, 127.x.x.x)
+
+### Rate limited
+
+Possible causes:
+- Exceeded `guardrails.rate_limit.max_per_minute` for that tool
 
 ## Logs
 
@@ -77,12 +86,51 @@ Possible causes:
 - logs user messages with timestamp
 
 ## Configuration
+Configuration is in `config.yaml`:
 
-Edit `langchain_agent/config.py`:
+```yaml
+model:
+  name: "llama3.1"
+  ollama_host: "http://127.0.0.1:11434"
 
-```python
-MODEL_NAME = "llama3.1"
-OLLAMA_HOST = "http://127.0.0.1:11434"
-AGENT_NAME = "electron-agent"
-LOG_FILE = "logs/agent.log"
+agent:
+  name: "electron-agent"
+  log_file: "logs/agent.log"
+
+sandbox:
+  path: "./sandbox"
+  directories: ["scans", "downloads", "temp"]
+
+tools:
+  auto: [read_file, call_api]
+  approval_required: [run_nmap, run_nuclei]
+
+guardrails:
+  max_input_length: 5000
+  blocked_targets:
+    - "127.0.0.1"
+    - "localhost"
+    - "169.254.169.254"
+  nmap:
+    allowed_flags: ["-sV", "-sS", "-Pn", "-F", "-O"]
+  rate_limit:
+    enabled: true
+    max_per_minute: 30
 ```
+
+## Troubleshooting
+
+### Input rejected
+- Check if input exceeds `guardrails.max_input_length` in config.yaml
+- Check for blocked prompt injection phrases
+
+### `run_nmap` blocked
+- Target contains blocked address from `guardrails.blocked_targets`
+- Options include flag outside `guardrails.nmap.allowed_flags`
+
+### `call_api` blocked
+- URL scheme not http/https
+- URL targets internal address (localhost, 127.x.x.x)
+
+### Rate limited
+- Exceeded `guardrails.rate_limit.max_per_minute` for tool

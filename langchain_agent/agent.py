@@ -1,10 +1,10 @@
 from langchain_ollama import ChatOllama
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.runnables import RunnableConfig
 from langchain.agents import create_agent
-from typing import Union, Iterator
+from typing import Iterator
 
-from langchain_agent.config import MODEL_NAME, OLLAMA_HOST, AGENT_NAME
+from langchain_agent.config import MODEL_NAME, OLLAMA_HOST
 from langchain_agent.tools import tools
 
 

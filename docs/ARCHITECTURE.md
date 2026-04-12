@@ -14,12 +14,17 @@ flowchart LR
     TOOLS --> RF[read_file]
     TOOLS --> CA[call_api]
     TOOLS --> NM[run_nmap]
+    TOOLS --> NU[run_nuclei]
+    TOOLS --> RL[rate_limiter.py]
+    MAIN --> CONFIG[config.yaml]
     MAIN --> LOG[(logs/agent.log)]
     
     subgraph langchain_agent[langchain_agent]
         GUARD
         AGENT
         TOOLS
+        RL
+        CONFIG
     end
 ```
 
@@ -113,19 +118,29 @@ sequenceDiagram
 
 ### langchain_agent/tools.py
 - `@tool` decorated functions
-- `read_file`: file system access
-- `call_api`: HTTP GET requests
+- `read_file`: file system access (sandbox-constrained)
+- `call_api`: HTTP GET requests (URL validation)
 - `run_nmap`: network scanning
+- `run_nuclei`: vulnerability scanning
 
 ### langchain_agent/guardrails.py
 - `validate_input()`: length + injection detection
-- `validate_nmap_target()`: blocks localhost/127.0.0.1/metadata IP
+- `validate_nmap_target()` / `validate_nuclei_target()`: blocks localhost/127.0.0.1/metadata IP
+- `validate_url()`: blocks unsafe URL schemes and internal targets
+
+### langchain_agent/rate_limiter.py
+- Per-tool rate limiting (configurable per-minute limits)
+
+### langchain_agent/approval_queue.py
+- Approval request management (pending, approved, denied, expired)
+- Auto-approve workflow
 
 ### langchain_agent/config.py
 - `MODEL_NAME`: Ollama model (default: "llama3.1")
 - `OLLAMA_HOST`: Ollama API URL
 - `AGENT_NAME`: display name
 - `LOG_FILE`: log file path
+- Guardrails configuration (from config.yaml)
 
 ## Tool Schemas
 
@@ -154,9 +169,23 @@ def run_nmap(target: str, options: str = "-sV") -> str:
 
 ## Security
 
-- Input: max 5000 chars, prompt injection detection
-- Tools: nmap target blocking (localhost, 127.0.0.1, 169.254.169.254)
-- Tools: flag allowlist (`-sV`, `-sS`, `-Pn`, `-F`, `-O`)
+- Input: max 5000 chars (configurable), prompt injection detection
+- Tools: nmap/nuclei target blocking (localhost, 127.0.0.1, 169.254.169.254) - configurable via config.yaml
+- Tools: nmap flag allowlist (`-sV`, `-sS`, `-Pn`, `-F`, `-O`) - configurable via config.yaml
+- call_api: URL scheme validation (only http/https), blocks internal targets
+- Rate limiting: configurable per-tool, per-minute limits
+
+## Tool Output Format
+
+All tools return standardized `ToolOutput` pydantic model:
+
+```python
+class ToolOutput(BaseModel):
+    status: str       # "success", "error", "blocked"
+    tool: str         # tool name
+    output: str      # result message
+    saved_to: str | None  # file path if saved
+```
 
 ## Future Extensibility
 

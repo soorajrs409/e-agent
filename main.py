@@ -1,9 +1,6 @@
 import os
-import sys
 import logging
 import logging.handlers
-from datetime import datetime
-from pathlib import Path
 
 from langchain_agent.agent import stream_agent
 from langchain_agent.guardrails import validate_input
@@ -13,7 +10,6 @@ from langchain_agent.config import (
     get_sandbox_path,
     SANDBOX_DIRS,
     TOOLS_APPROVAL_REQUIRED,
-    APPROVAL_TIMEOUT_MINUTES,
 )
 from langchain_agent.approval_queue import get_approval_queue, ApprovalStatus
 

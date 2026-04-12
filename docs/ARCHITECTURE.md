@@ -7,14 +7,20 @@ This project uses LangChain's ReAct (Reason + Act) agent pattern with Ollama for
 ```mermaid
 flowchart LR
     U[User Terminal] --> MAIN[main.py]
-    MAIN --> GUARD[langchain_agent/<br/>guardrails.py]
-    MAIN --> AGENT[langchain_agent/<br/>agent.py<br/>LangChain create_agent]
+    MAIN --> GUARD[guardrails.py]
+    MAIN --> AGENT[agent.py]
     AGENT --> LLM[ChatOllama]
-    AGENT --> TOOLS[langchain_agent/<br/>tools.py<br/>@tool decorators]
+    AGENT --> TOOLS[tools.py]
     TOOLS --> RF[read_file]
     TOOLS --> CA[call_api]
     TOOLS --> NM[run_nmap]
     MAIN --> LOG[(logs/agent.log)]
+    
+    subgraph langchain_agent[langchain_agent]
+        GUARD
+        AGENT
+        TOOLS
+    end
 ```
 
 ## Single-Process Architecture

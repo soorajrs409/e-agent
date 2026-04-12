@@ -11,14 +11,20 @@ This project uses LangChain's ReAct agent pattern with Ollama for natural langua
 ```mermaid
 flowchart LR
     U[User] --> CLI[main.py]
-    CLI --> GUARD[langchain_agent/<br/>guardrails.py]
-    CLI --> AGENT[langchain_agent/<br/>agent.py<br/>LangChain]
+    CLI --> GUARD[guardrails.py]
+    CLI --> AGENT[agent.py]
     AGENT --> LLM[ChatOllama]
-    AGENT --> TOOLS[langchain_agent/<br/>tools.py<br/>@tool decorators]
+    AGENT --> TOOLS[tools.py]
     TOOLS --> TF[read_file]
     TOOLS --> TA[call_api]
     TOOLS --> TN[run_nmap]
     CLI --> LOG[(logs/agent.log)]
+    
+    subgraph langchain_agent[langchain_agent]
+        GUARD
+        AGENT
+        TOOLS
+    end
 ```
 
 ## Repository Layout

@@ -1,0 +1,40 @@
+# e-agent Configuration
+
+# Model Settings
+model:
+  name: "llama3.1"
+  ollama_host: "http://127.0.0.1:11434"
+
+# Agent Settings
+agent:
+  name: "electron-agent"
+  log_file: "logs/agent.log"
+
+# Sandbox Settings
+sandbox:
+  # Path to sandbox workspace (relative or absolute)
+  # Default: ./sandbox (relative to working directory)
+  path: "./sandbox"
+  # Subdirectories to create
+  directories:
+    - scans
+    - downloads
+    - temp
+
+# Tool Categories
+# Tools in 'auto' run immediately without approval
+# Tools in 'approval_required' need explicit approval
+tools:
+  auto:
+    - read_file
+    - call_api
+  approval_required:
+    - run_nmap
+    - run_nuclei
+
+# Approval System Settings
+approval:
+  # Timeout in minutes before pending approval expires
+  timeout_minutes: 5
+  # Enable session-based auto-approval (/approve-all)
+  allow_approve_all: true

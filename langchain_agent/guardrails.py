@@ -54,3 +54,21 @@ def validate_nmap_target(target: str) -> tuple[bool, str]:
             return False, f"Blocked target: '{blocked}' is not allowed"
 
     return True, ""
+
+
+def validate_nuclei_target(target: str) -> tuple[bool, str]:
+    """Validate nuclei scan target.
+
+    Args:
+        target: The target URL or hostname
+
+    Returns:
+        Tuple of (is_valid, reason_if_invalid)
+    """
+    target_lower = target.lower()
+
+    for blocked in BLOCKED_TARGETS:
+        if blocked in target_lower:
+            return False, f"Blocked target: '{blocked}' is not allowed"
+
+    return True, ""

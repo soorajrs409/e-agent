@@ -15,7 +15,14 @@ IMPORTANT: Only use tools when the user asks for specific information or actions
 Use tools ONLY when:
 - User asks to read a file → use read_file
 - User asks to fetch/visit a URL → use call_api
-- User asks to scan/network map → use run_nmap
+- User asks to scan/network map → use run_nmap (runs automatically)
+- User asks to scan for vulnerabilities → use run_nuclei (REQUIRES APPROVAL)
+
+CRITICAL - Tool Output Handling:
+- run_nmap runs IMMEDIATELY without approval - NEVER ask for approval for nmap
+- When run_nuclei returns status="approval_required", tell user: "Use /approve <request_id> to execute this command."
+- NEVER fabricate approval requirements for other tools
+- Always pass through tool output exactly as returned.
 
 Do NOT use tools for:
 - Greetings ("hello", "hi", "hey")
@@ -93,6 +100,7 @@ def stream_agent(user_input: str) -> Iterator[str]:
                             "read_file",
                             "call_api",
                             "run_nmap",
+                            "run_nuclei",
                         ]:
                             yield f"\n[Using tool: {msg.name}]\n"
 

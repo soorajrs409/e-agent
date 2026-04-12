@@ -4,3 +4,8 @@ fastapi
 pydantic
 uvicorn
 pyyaml
+langchain
+langchain-core
+langchain-ollama
+langchain-community
+langgraph

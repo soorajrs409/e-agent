@@ -1,47 +1,60 @@
 # Architecture
 
-This project runs as a two-process local system:
-
-- Process 1: CLI agent for prompt orchestration and policy checks
-- Process 2: FastAPI tool server for external actions
+This project uses LangChain's ReAct (Reason + Act) agent pattern with Ollama for tool-calling orchestration.
 
 ## High-Level Topology
 
 ```mermaid
 flowchart LR
     U[User Terminal] --> MAIN[main.py]
-    MAIN --> CORE[agent/core.py]
-    CORE --> GUARD[agent/guardrails.py]
-    CORE --> OLLAMA[Ollama Chat API]
-    CORE --> MCPCLIENT[agent/mcp_client.py]
-    MCPCLIENT --> MCPSERVER[FastAPI Tool Server]
-    MCPSERVER --> TOOL1[read_file]
-    MCPSERVER --> TOOL2[call_api]
-    MCPSERVER --> TOOL3[run_nmap]
+    MAIN --> GUARD[guardrails.py]
+    MAIN --> AGENT[agent.py]
+    AGENT --> LLM[ChatOllama]
+    AGENT --> TOOLS[tools.py]
+    TOOLS --> RF[read_file]
+    TOOLS --> CA[call_api]
+    TOOLS --> NM[run_nmap]
     MAIN --> LOG[(logs/agent.log)]
 ```
 
-## Prompt Assembly And Refresh
+## Single-Process Architecture
 
-The current implementation builds the system prompt lazily on demand, then reuses it. If discovery returns no tools, the agent can force a refresh and rebuild the prompt.
+The system runs in a single Python process:
 
-```mermaid
-flowchart TD
-    A["agent_stream_chat"] --> B["get_system_prompt"]
-    B --> C{"system_prompt cached?"}
-    C -- no --> D["discover_tools(force_refresh=True)"]
-    C -- yes --> E["discover_tools(from cache)"]
-    E --> F{"tools empty?"}
-    F -- yes --> D
-    F -- no --> G["reuse cached prompt"]
-    D --> H["build_tools_section"]
-    H --> I["BASE_SYSTEM_PROMPT + YAML tool section"]
-    I --> J["cache system_prompt"]
-    J --> K["return prompt"]
-    G --> K
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     main.py (CLI Loop)                       │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+          ┌───────────┴───────────┐
+          │                       │
+          ▼                       ▼
+   guardrails.py           langchain_agent/
+                                  │
+                     ┌────────────┼────────────┐
+                     │            │            │
+                     ▼            ▼            ▼
+                 config.py   tools.py      agent.py
+                              │            │
+                              ▼            ▼
+                           [tools]    ChatOllama
+                                       + ReAct Agent
 ```
 
-Starting the tool server before the CLI still gives the cleanest startup. The runtime can recover from an earlier empty discovery attempt, but it does not automatically refresh a healthy non-empty cache when the server's tool list changes later.
+## LangChain Components
+
+### ChatOllama
+- Connects to local Ollama instance
+- Handles chat completions with streaming support
+
+### create_react_agent
+- LangGraph's pre-built ReAct agent
+- Handles: think → act → observe → repeat loop
+- Built-in tool calling with structured output
+
+### @tool Decorated Functions
+- Auto-generate JSON schemas for prompts
+- Direct Python execution (no HTTP overhead)
 
 ## Request Lifecycle
 
@@ -49,184 +62,99 @@ Starting the tool server before the CLI still gives the cleanest startup. The ru
 sequenceDiagram
     participant User
     participant Main as main.py
-    participant Core as agent/core.py
-    participant Guard as agent/guardrails.py
-    participant LLM as Ollama
-    participant MCP as agent/mcp_client.py
-    participant Server as tool server
+    participant Guard as guardrails.py
+    participant Agent as agent.py
+    participant LLM as ChatOllama
+    participant Tool as @tool function
 
     User->>Main: prompt
     Main->>Main: log USER entry
-    Main->>Core: agent_stream_chat(prompt)
-    Core->>Guard: validate_user_input
+    Main->>Guard: validate_input()
 
     alt blocked
-        Guard-->>Core: False + reason
-        Core-->>User: guard block message
+        Guard-->>Main: False + reason
+        Main-->>User: guard block message
     else allowed
-        Guard-->>Core: True
-        Core->>LLM: chat(stream=True)
-        LLM-->>Core: streamed chunks
-        Core->>Core: buffer full response
-        Core->>Core: decode JSON candidates from response text
+        Guard-->>Main: True
+        Main->>Agent: invoke_agent(prompt)
+        Agent->>LLM: chat completion
 
-        alt valid tool JSON found
-            Core->>Guard: validate_tool_call
-            alt blocked tool request
-                Guard-->>Core: False + reason
-                Core-->>User: guard block message
-            else allowed
-                Core->>MCP: POST /tools/{tool}
-                MCP->>Server: HTTP request with args
-                alt server returns success payload
-                    Server-->>MCP: JSON output payload
-                    MCP-->>Core: parsed response
-                else server fails
-                    Server-->>MCP: error, bad status, or invalid body
-                    MCP->>Server: try next configured MCP server
-                end
-                Core->>Guard: filter_output(output)
-                Core-->>User: print tool result
-            end
-        else no valid tool JSON
-            Core-->>User: print normal model response
+        alt tool needed
+            LLM-->>Agent: tool call request
+            Agent->>Tool: execute tool
+            Tool-->>Agent: tool result
+            Agent->>LLM: continue with result
         end
+
+        LLM-->>Agent: final response
+        Agent-->>Main: response text
+        Main-->>User: display response
     end
-```
-
-## Agent Internal Flow
-
-```mermaid
-flowchart TD
-    A[User input] --> B{Input valid?}
-    B -- no --> C[Print guard message and stop]
-    B -- yes --> D[Get or rebuild system_prompt]
-    D --> E{Ollama request succeeds?}
-    E -- no --> F[Print Ollama error]
-    E -- yes --> G[Buffer streamed response]
-    G --> H{Valid tool JSON found?}
-    H -- no --> I[Print plain response]
-    H -- yes --> J{Tool call allowed?}
-    J -- no --> K[Print block message]
-    J -- yes --> L[call_tool via MCP client]
-    L --> M{Any MCP server returns valid output?}
-    M -- no --> N[Print tool error]
-    M -- yes --> O[Filter output and print]
-```
-
-## Deployment Boundary
-
-```mermaid
-flowchart LR
-    subgraph Agent_Runtime[Agent Runtime]
-      MAIN[main.py]
-      CORE[agent/core.py]
-      BASE[base_prompt.py]
-      PB[prompt_builder.py]
-      GUARD[guardrails.py]
-      MCPCLIENT[mcp_client.py]
-    end
-
-    subgraph Tool_Runtime[Tool Server Runtime]
-      API[FastAPI app]
-      LIST[GET /tools]
-      RF[POST /tools/read_file]
-      CA[POST /tools/call_api]
-      NM[POST /tools/run_nmap]
-    end
-
-    CORE --> BASE
-    CORE --> PB
-    CORE --> GUARD
-    CORE --> MCPCLIENT
-    MCPCLIENT --> API
-    API --> LIST
-    API --> RF
-    API --> CA
-    API --> NM
 ```
 
 ## Module Responsibilities
 
-- `main.py`
-  - starts the CLI loop
-  - logs user inputs
-  - delegates each prompt to `agent_stream_chat`
-- `agent/core.py`
-  - builds and refreshes the system prompt from discovered tools
-  - validates user input
-  - calls Ollama with request-level error handling
-  - extracts and dispatches tool calls
-  - filters and prints tool output
-- `agent/base_prompt.py`
-  - defines the base tool-usage policy and JSON output rules
-- `agent/prompt_builder.py`
-  - converts discovered tools into YAML for prompt injection
-- `agent/mcp_client.py`
-  - discovers tools from one or more MCP servers
-  - caches discovered tool metadata
-  - executes tool POST requests with retry/failover across configured servers
-- `agent/guardrails.py`
-  - blocks common prompt-injection phrases
-  - blocks selected scan targets
-  - filters sensitive phrases from output
-- `tool-servers/core_server/server.py`
-  - publishes tool metadata
-  - implements `read_file`, `call_api`, and `run_nmap`
+### main.py
+- CLI loop with input/output
+- Logging to `logs/agent.log`
+- Delegates to LangChain agent
 
-## Interface Contracts
+### langchain_agent/agent.py
+- `ChatOllama` initialization
+- `create_react_agent` setup
+- `invoke_agent()` function
+- Error handling for Ollama connection
 
-### Model To Agent
+### langchain_agent/tools.py
+- `@tool` decorated functions
+- `read_file`: file system access
+- `call_api`: HTTP GET requests
+- `run_nmap`: network scanning
 
-Expected tool payload:
+### langchain_agent/guardrails.py
+- `validate_input()`: length + injection detection
+- `validate_nmap_target()`: blocks localhost/127.0.0.1/metadata IP
 
-```json
+### langchain_agent/config.py
+- `MODEL_NAME`: Ollama model (default: "llama3")
+- `OLLAMA_HOST`: Ollama API URL
+- `AGENT_NAME`: display name
+- `LOG_FILE`: log file path
+
+## Tool Schemas
+
+LangChain auto-generates JSON schemas from `@tool` decorators:
+
+```python
+@tool
+def run_nmap(target: str, options: str = "-sV") -> str:
+    """Run network scan..."""
+    ...
+
+# Generates:
 {
-  "tool": "<tool_name>",
-  "args": {
-    "key": "value"
+  "name": "run_nmap",
+  "description": "Run network scan...",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "target": {"type": "string"},
+      "options": {"type": "string", "default": "-sV"}
+    },
+    "required": ["target"]
   }
 }
 ```
 
-The active prompt is built from `BASE_SYSTEM_PROMPT` and the discovered tool YAML. `agent/prompt.py` is still present in the repo, but it is not the primary runtime prompt source.
+## Security
 
-### Agent To Tool Server
+- Input: max 5000 chars, prompt injection detection
+- Tools: nmap target blocking (localhost, 127.0.0.1, 169.254.169.254)
+- Tools: flag allowlist (`-sV`, `-sS`, `-Pn`, `-F`, `-O`)
 
-- request path: `POST /tools/<tool_name>`
-- request body: tool args as JSON
-- success response: `{ "output": ... }`
-- error response: `{ "error": ... }`
+## Future Extensibility
 
-### Tool Discovery Format
-
-`GET /tools` returns:
-
-```json
-{
-  "tools": [
-    {
-      "name": "read_file",
-      "description": "Read file contents from disk",
-      "args": ["file_path"]
-    }
-  ]
-}
-```
-
-The client adds a `server` field to each discovered tool entry before caching it. Discovery can also be force-refreshed when the runtime needs to rebuild the prompt.
-
-## Security And Guardrails
-
-- Input filtering blocks known prompt-injection strings.
-- `run_nmap` targets are blocked if they include `127.0.0.1`, `localhost`, or `169.254.169.254`.
-- `run_nmap` options are restricted server-side to `-sV`, `-sS`, `-Pn`, `-F`, and `-O`.
-- Output filtering replaces responses containing selected sensitive phrases.
-
-## Current Limitations
-
-1. Tool discovery is cached for the lifetime of the process. The runtime only force-refreshes when the cache is empty, so prompt-visible tool changes on an already healthy server require an agent restart.
-2. The Ollama response is buffered completely before any user-visible output is printed, even though streaming is enabled upstream.
-3. Logging currently captures user inputs only.
-4. `call_api` performs a raw GET and returns the response body as text without additional policy, shaping, or explicit HTTP-status handling.
-5. `agent/prompt.py` remains as an older prompt definition and may confuse future maintenance unless it is removed or clearly deprecated.
+The architecture supports:
+- Adding more tools (add `@tool` decorated function)
+- Conversation memory (add `ChatMessageHistory`)
+- RAG capabilities (add vector store integration)

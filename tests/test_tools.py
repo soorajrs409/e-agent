@@ -98,3 +98,47 @@ class TestCallApi:
 
         assert result.status == "blocked"
         assert "not allowed" in result.output.lower()
+
+
+class TestSanitizeFilename:
+    def test_simple_filename(self):
+        from langchain_agent.tools import _sanitize_filename
+
+        result = _sanitize_filename("http://example.com/data.json")
+        assert result == "data.json"
+
+    def test_query_string_removed(self):
+        from langchain_agent.tools import _sanitize_filename
+
+        result = _sanitize_filename("http://example.com/api/data?key=value")
+        assert "?" not in result
+        assert "&" not in result
+        assert result == "data"
+
+    def test_fragment_removed(self):
+        from langchain_agent.tools import _sanitize_filename
+
+        result = _sanitize_filename("http://example.com/page#section")
+        assert "#" not in result
+        assert result == "page"
+
+    def test_trailing_slash_defaults(self):
+        from langchain_agent.tools import _sanitize_filename
+
+        result = _sanitize_filename("http://example.com/")
+        assert result.startswith("download-")
+
+    def test_no_path_defaults(self):
+        from langchain_agent.tools import _sanitize_filename
+
+        result = _sanitize_filename("http://example.com")
+        assert result.startswith("download-")
+
+    def test_long_filename_truncated(self):
+        from langchain_agent.tools import _sanitize_filename
+
+        long_name = "a" * 100 + ".txt"
+        url = f"http://example.com/{long_name}"
+        result = _sanitize_filename(url)
+        assert len(result) <= 50
+        assert result.startswith("download-")

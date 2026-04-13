@@ -1,5 +1,5 @@
 from langchain_ollama import ChatOllama
-from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
+from langchain_core.messages import HumanMessage, AIMessage, BaseMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, END
 from typing import Iterator, TypedDict, Literal
@@ -31,6 +31,23 @@ llm = ChatOllama(
     model=MODEL_NAME,
     base_url=OLLAMA_HOST,
 )
+
+SYSTEM_PROMPT = """You are a security-focused assistant with access to tools for scanning and file operations.
+
+Available tools and their EXACT parameters:
+- read_file(file_path: str) - Read a file from the sandbox directory
+- call_api(url: str) - Make an HTTP GET request to a URL. The parameter is "url", NOT "target"
+- run_nmap(target: str, options: str = "-sV") - Scan a target for open ports. Requires approval
+- run_nuclei(target: str, options: str = "-severity critical,high,medium,low") - Scan a target for vulnerabilities. Requires approval
+
+IMPORTANT RULES:
+1. Only use tools when the user's request clearly requires a tool action (scanning, reading files, making HTTP requests)
+2. For general questions, conversations, greetings, and explanations, respond directly WITHOUT using any tools
+3. If you are unsure whether to use a tool, respond in plain text instead of calling a tool
+4. Never call a tool with empty or missing required arguments
+5. Respond naturally to conversational input like "hey", "hello", "how are you" without tools
+6. Use the EXACT parameter names shown above. call_api uses "url", not "target"
+7. When a user asks to scan a target and find vulnerabilities, use run_nuclei with the "target" parameter, not call_api"""
 
 
 def create_langgraph_agent(event_callback=None):
@@ -121,7 +138,7 @@ def create_langgraph_agent(event_callback=None):
 
         # If it's a question asking about wellbeing (ends with ?, <=6 words)
         if content.endswith("?") and len(words) <= 6:
-            wellbeing_words = ["how", "doing", "life", "going", "feeling", "you"]
+            wellbeing_words = ["how", "doing", "going", "feeling"]
             if any(w in words for w in wellbeing_words):
                 return "greeting"
 
@@ -169,9 +186,11 @@ def create_langgraph_agent(event_callback=None):
     def call_llm(state: AgentState) -> AgentState:
         """Call the LLM with current messages."""
         messages = state["messages"]
+        system_msg = SystemMessage(content=SYSTEM_PROMPT)
+        messages_with_system = [system_msg] + messages
 
         response = llm_with_tools.invoke(
-            messages,
+            messages_with_system,
             config=RunnableConfig(configurable={"thread_id": "main"}),
         )
         return {
@@ -397,8 +416,10 @@ def stream_agent(user_input: str, event_callback=None) -> Iterator[str]:
                                 yield f"\n{result}\n"
                             elif result.startswith("[error]"):
                                 yield f"\n{result}\n"
-                            elif result.strip():  # Non-error, non-approval content
+                            elif result.strip():
                                 yield f"\n{result}\n"
+                            else:
+                                yield "\n(empty result)\n"
                 elif node_name == "greeting_response":
                     if isinstance(node_data, dict) and "messages" in node_data:
                         messages = node_data["messages"]

@@ -71,7 +71,13 @@ print(events)
 
 ## Guardrails
 
-- `guardrails.py` blocks targets: `127.0.0.1`, `localhost`, `169.254.169.254`
+- `guardrails.py` validates targets with DNS resolution + CIDR blocking:
+  - Blocks `127.0.0.0/8` (all loopback), `::1`, `::ffff:127.0.0.0/104`, `0.0.0.0`, `169.254.0.0/16`
+  - Resolves hostnames via `socket.getaddrinfo()` to detect alternate IP representations (hex, octal, decimal, IPv6-mapped)
+  - Falls back to string-based checks on DNS timeout
+  - Uses hostname-boundary matching (`(?:^|\.)blocked(?:$|\.)`) to avoid false positives (e.g. `not-localhost.com` is allowed)
+- `validate_url()` blocks empty hostnames, non-HTTP schemes, and resolves hostnames to check IPs
+- `validate_nmap_target()` / `validate_nuclei_target()` use same DNS+CIDR resolution + boundary matching
 - `run_nmap` allows flags: `-sV`, `-sS`, `-Pn`, `-F`, `-O`
 - Input max 5000 chars; prompt-injection blocked
 - Max 5 tools per chain; errors terminate chain
@@ -92,6 +98,13 @@ The agent uses LangGraph for multi-tool chains:
 - Output from one tool feeds to next
 - Errors terminate the chain (no retry)
 - Approval pauses mid-chain (single tool only on resume)
+- LLM receives a system prompt with tool descriptions and parameter names to reduce hallucinated tool calls
+
+## Streaming Output
+
+- nmap and nuclei scan output streams live to the terminal during `/approve` execution
+- Scan progress (banner, templates loaded, results) prints line-by-line via `subprocess.Popen` with `stderr=subprocess.STDOUT`
+- Empty scan result files are reported as "No vulnerabilities found" instead of blank output
 
 ## Testing
 

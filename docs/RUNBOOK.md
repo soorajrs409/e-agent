@@ -58,8 +58,8 @@ python -c "from langchain_agent.agent import create_langgraph_agent; print('OK')
 When the agent runs a tool that requires approval:
 
 ```
-[*] Running run_nmap...
-[✗] run_nmap failed: approval required
+[*] Running run_nuclei...
+[✗] run_nuclei failed: approval required
 [approval_required] Use /approve abc123 to execute this command.
 ```
 
@@ -68,6 +68,10 @@ Approve the single tool:
 ```bash
 /approve abc123
 ```
+
+After approval, the scan runs with live output streaming to the terminal.
+Nuclei shows its banner, template loading progress, and findings as they
+are discovered. Nmap shows port scan results line by line.
 
 Note: After approval, only the approved tool runs. If the request was part
 of a multi-tool chain, the chain does not resume automatically. Re-issue
@@ -96,10 +100,14 @@ The agent streams tool lifecycle events:
 
 ```
 [*] Running read_file...        # Tool started
-[✓] read_file completed      # Success
-[*] Running run_nmap...        # Next tool started
-[✗] run_nmap failed: <error>  # Failure
+[✓] read_file completed         # Success
+[*] Running run_nmap...          # Next tool started
+[✗] run_nmap failed: <error>    # Failure
 ```
+
+For nmap and nuclei, scan output streams live during `/approve` execution.
+Results are also saved to `sandbox/scans/`. Empty results are reported as
+"No vulnerabilities found".
 
 ## Troubleshooting
 
@@ -113,6 +121,26 @@ The agent streams tool lifecycle events:
 
 - Verify tools are bound: `python -c "from langchain_agent.tools import tools; print([t.name for t in tools])"`
 - Check model supports tool calling (llama3.1+ recommended)
+- The 8B quantized model may hallucinate tool calls (wrong parameters, calling tools for conversational input) — a larger model (70B+) produces more reliable results
+
+### LLM calls wrong tool or wrong parameters
+
+- The agent uses a system prompt with exact parameter names to guide tool selection
+- If the model calls `call_api` with `target` instead of `url`, or calls `call_api` instead of `run_nuclei` for vulnerability scanning, this is an LLM limitation
+- Upgrading to a larger model (e.g. `llama3.1:70b`) improves tool selection accuracy
+- The system prompt lists tool parameter names explicitly to minimize hallucination
+
+### Scan shows no output during approval
+
+- nmap and nuclei stream output live to the terminal during `/approve`
+- If you see only `[*] Executing run_nuclei (this may take a while)...` with no further output, the scan is running but may take time to find results
+- Nuclei output (banner, progress, findings) streams from both stdout and stderr
+- If a scan finds no vulnerabilities, it reports "No vulnerabilities found"
+
+### Empty file when reading scan results
+
+- If nuclei finds zero vulnerabilities, the results file will be empty and `read_file` reports "(File is empty: ...)"
+- This is correct behavior — the scan completed but found nothing
 
 ### Input rejected
 
@@ -121,7 +149,9 @@ The agent streams tool lifecycle events:
 
 ### Tool blocked
 
-- Target contains blocked address from `guardrails.blocked_targets`
+- Target contains blocked address — guardrails resolve hostnames via DNS and check resolved IPs against blocked ranges (`127.0.0.0/8`, `::1`, `0.0.0.0`, `169.254.0.0/16`)
+- Alternate IP representations (hex, octal, decimal, IPv6-mapped) are also blocked via DNS resolution
+- Hostnames matching blocked targets use boundary matching (e.g., `not-localhost.com` is allowed, `localhost` is blocked)
 - Options include flag outside `guardrails.nmap.allowed_flags`
 - Check error message for specific reason
 

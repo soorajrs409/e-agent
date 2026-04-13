@@ -1,10 +1,12 @@
 from langchain_core.tools import tool
 from pathlib import Path
+import re
 import subprocess
 import shlex
 import requests
 from datetime import datetime
 from typing import Union
+from urllib.parse import urlparse
 from pydantic import BaseModel
 import os
 
@@ -63,6 +65,25 @@ def emit_tool_event(tool_name: str, event_type: str, message: str = ""):
         _tool_event_callback(event)
 
 
+def _sanitize_filename(url: str) -> str:
+    """Extract and sanitize a filename from a URL."""
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    filename = path.split("/")[-1] if path else ""
+
+    if not filename:
+        filename = f"download-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    else:
+        filename = re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
+        if not filename or filename.startswith("."):
+            filename = f"download-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+    if len(filename) > 50:
+        filename = f"download-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+    return filename
+
+
 @tool
 def read_file(file_path: str) -> ToolOutput:
     """Read file contents from disk within sandbox."""
@@ -97,6 +118,8 @@ def read_file(file_path: str) -> ToolOutput:
             )
 
         content = resolved.read_text()
+        if not content.strip():
+            content = f"(File is empty: {file_path})"
         return ToolOutput(
             status="success",
             tool="read_file",
@@ -114,7 +137,7 @@ def read_file(file_path: str) -> ToolOutput:
 
 @tool
 def call_api(url: str) -> ToolOutput:
-    """Make HTTP GET request to a URL."""
+    """Fetch the content of a webpage or API endpoint via HTTP GET. Use this to download or inspect page content, NOT for security scanning. For vulnerability scanning use run_nuclei, for port scanning use run_nmap."""
     from langchain_agent.guardrails import validate_url
 
     rate_limiter = get_rate_limiter()
@@ -146,9 +169,7 @@ def call_api(url: str) -> ToolOutput:
             downloads_dir = sandbox / "downloads"
             downloads_dir.mkdir(parents=True, exist_ok=True)
 
-            filename = url.split("/")[-1] or "download"
-            if len(filename) > 50:
-                filename = f"download-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            filename = _sanitize_filename(url)
 
             file_path = downloads_dir / filename
             file_path.write_text(content)
@@ -171,7 +192,7 @@ def call_api(url: str) -> ToolOutput:
 
 @tool
 def run_nmap(target: str, options: str = "-sV") -> Union[ApprovalRequired, ToolOutput]:
-    """Run network scan to find open ports/services."""
+    """Run nmap to scan a target host for open ports and running services. Use this when the user wants a port scan. The target should be a hostname or IP address (e.g. '192.168.1.1' or 'example.com')."""
     from langchain_agent.config import GUARDRAILS_NMAP_ALLOWED_FLAGS
 
     rate_limiter = get_rate_limiter()
@@ -225,22 +246,37 @@ def run_nmap(target: str, options: str = "-sV") -> Union[ApprovalRequired, ToolO
 
 
 def _execute_nmap(target: str, options: str) -> ToolOutput:
-    """Execute nmap scan."""
+    """Execute nmap scan with live output streaming."""
     try:
         cmd = ["nmap"] + shlex.split(options) + [target]
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=TOOL_NMAP_TIMEOUT
-        )
-
-        if result.returncode != 0:
+        lines = []
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            )
+            if proc.stdout:
+                for line in proc.stdout:
+                    print(line, end="", flush=True)
+                    lines.append(line)
+            proc.wait(timeout=TOOL_NMAP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()
             return ToolOutput(
                 status="error",
                 tool="run_nmap",
-                output=f"Nmap error: {result.stderr}",
+                output="Error: Scan timed out",
                 saved_to=None,
             )
 
-        output = result.stdout
+        if proc.returncode != 0:
+            return ToolOutput(
+                status="error",
+                tool="run_nmap",
+                output=f"Nmap error: exit code {proc.returncode}",
+                saved_to=None,
+            )
+
+        output = "".join(lines)
 
         sandbox = get_sandbox_path()
         scans_dir = sandbox / "scans"
@@ -278,7 +314,7 @@ def _execute_nmap(target: str, options: str) -> ToolOutput:
 def run_nuclei(
     target: str, options: str = "-severity critical,high,medium,low"
 ) -> Union[ApprovalRequired, ToolOutput]:
-    """Run vulnerability scan using nuclei."""
+    """Run nuclei vulnerability scanner against a target URL or hostname. Use this when the user asks to scan for vulnerabilities, security issues, or CWEs. The target should be a URL (e.g. 'http://example.com') or hostname."""
     rate_limiter = get_rate_limiter()
     allowed, reason = rate_limiter.is_allowed("run_nuclei")
     if not allowed:
@@ -365,26 +401,44 @@ def _execute_nuclei(target: str, options: str) -> ToolOutput:
             nuclei_bin,
             "-u",
             target,
-            "-silent",
             "-nc",
             "-no-interactsh",
             "-o",
             str(output_file),
         ] + shlex.split(options)
 
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=TOOL_NUCLEI_TIMEOUT, env=env
-        )
-
-        if result.returncode != 0 and result.returncode != 1:
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+            )
+            if proc.stdout:
+                for line in proc.stdout:
+                    print(line, end="", flush=True)
+            proc.wait(timeout=TOOL_NUCLEI_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()
             return ToolOutput(
                 status="error",
                 tool="run_nuclei",
-                output=f"Error: {result.stderr}",
+                output="Error: Scan timed out",
                 saved_to=None,
             )
 
-        output = output_file.read_text() if output_file.exists() else result.stdout
+        if proc.returncode != 0 and proc.returncode != 1:
+            return ToolOutput(
+                status="error",
+                tool="run_nuclei",
+                output=f"Error: nuclei exited with code {proc.returncode}",
+                saved_to=None,
+            )
+
+        output = output_file.read_text() if output_file.exists() else ""
+        if not output.strip():
+            output = "No vulnerabilities found."
 
         return ToolOutput(
             status="success",

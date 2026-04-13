@@ -184,6 +184,7 @@ sequenceDiagram
 - Logging to `logs/agent.log`
 - Delegates to LangGraph agent
 - Event callback for tool lifecycle display
+- `/approve` and `/deny` command handling with live scan output streaming
 
 ### langchain_agent/agent.py
 - `ChatOllama` initialization
@@ -192,15 +193,23 @@ sequenceDiagram
 - `invoke_agent()` for blocking calls
 - Tool execution state management
 - Greeting detection for casual input
+- System prompt guides LLM tool selection and parameter names
 
 ### langchain_agent/tools.py
-- `@tool` decorated functions
+- `@tool` decorated functions with detailed descriptions to guide LLM tool selection
 - `ToolEvent` class for lifecycle events
 - `get_tool_function()` lookup
+- `_sanitize_filename()` for safe download filenames from URLs
+- nmap/nuclei scans stream output live via `subprocess.Popen` with `stderr=subprocess.STDOUT`
+- Empty scan results reported as "No vulnerabilities found"
 
 ### langchain_agent/guardrails.py
 - `validate_input()`: length + injection detection
-- Target blocking (localhost, metadata IPs)
+- `validate_url()`: scheme check, empty hostname check, DNS resolution + CIDR blocking
+- `validate_nmap_target()` / `validate_nuclei_target()`: hostname-boundary matching + DNS resolution + CIDR blocking
+- `resolve_host_to_ips()`: DNS resolution with timeout, returns list of IPs
+- `is_blocked_ip()`: checks IPs against blocked ranges using `ipaddress` module
+- `_is_hostname_blocked()`: shared hostname blocking logic (DNS + string fallback)
 
 ### langchain_agent/approval_queue.py
 - Approval request management
@@ -231,9 +240,13 @@ Tools requiring approval return an `ApprovalRequired` model with a
 ## Security
 
 - Input: max 5000 chars, prompt injection detection
-- nmap/nuclei: target blocking via config
-- nmap: flag allowlist
-- call_api: URL scheme + internal targeting blocks
+- Target validation: DNS resolution (`socket.getaddrinfo`) detects alternate IP representations (hex, octal, decimal, IPv6-mapped)
+- Blocked CIDR ranges: `127.0.0.0/8`, `::1/128`, `::ffff:127.0.0.0/104`, `0.0.0.0/32`, `169.254.0.0/16`
+- Hostname-boundary matching avoids false positives (e.g., `not-localhost.com` allowed)
+- Empty/null hostname in URLs rejected
+- nmap/nuclei: target blocking via DNS + CIDR resolution
+- nmap: flag allowlist (`-sV`, `-sS`, `-Pn`, `-F`, `-O`)
+- call_api: URL scheme + internal targeting blocks + filename sanitization
 - Rate limiting: per-tool limits
 - Max chain: 5 tools to prevent runaway
 
@@ -250,15 +263,32 @@ Tool events stream during execution:
 [✓] run_nuclei completed
 ```
 
-Approval pauses the chain (does not resume it):
+Approval flow with live scan output:
 ```
-[*] Running run_nmap...
-[✓] run_nmap completed
+[*] Running run_nuclei...
+[✗] run_nuclei failed: approval required
 [approval_required] Use /approve abc123
 ```
 
-After `/approve`, only the single approved tool runs — the chain does not
-continue automatically.
+After `/approve`, the scan runs with live output streaming:
+```
+[+] you -> /approve abc123
+[*] Executing run_nuclei (this may take a while)...
+
+                     __     _
+   ____  __  _______/ /__  (_)
+  / __ \/ / / / ___/ / _ \/ /
+ / / / / /_/ / /__/ /  __/ /
+/_/ /_/\__,_/\___/_/\___/_/   v3.7.0
+
+[INF] Templates loaded for current scan: 6444
+[INF] Targets loaded for current scan: 1
+[CVE-2021-44228] http://target/...
+Nuclei scan complete. Results saved to: /path/to/file
+[Saved to: /path/to/file]
+```
+
+Empty results are reported as "No vulnerabilities found" instead of blank output.
 
 ## Future Extensibility
 

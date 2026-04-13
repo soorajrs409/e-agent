@@ -66,6 +66,8 @@ def handle_approve(request_id: str) -> str:
         tool_name = result["tool"]
         args = result["args"]
 
+        print(f"[*] Executing {tool_name} (this may take a while)...", flush=True)
+
         if tool_name == "run_nuclei":
             from langchain_agent.tools import _execute_nuclei
 
@@ -74,16 +76,17 @@ def handle_approve(request_id: str) -> str:
                 f"TOOL_EXEC: {tool_name} output: {len(output.output) if hasattr(output, 'output') else 0} chars"
             )
             saved_info = f"\n[Saved to: {output.saved_to}]" if output.saved_to else ""
-            return f"Executing {tool_name}...\n{output.output}{saved_info}"
+            return f"{output.output}{saved_info}"
 
         if tool_name == "run_nmap":
             from langchain_agent.tools import _execute_nmap
 
             output = _execute_nmap(args.get("target", ""), args.get("options", ""))
             logger.info(
-                f"TOOL_EXEC: {tool_name} output: {len(output) if output else 0} chars"
+                f"TOOL_EXEC: {tool_name} output: {len(output.output) if hasattr(output, 'output') else 0} chars"
             )
-            return f"Executing {tool_name}...\n{output}"
+            saved_info = f"\n[Saved to: {output.saved_to}]" if output.saved_to else ""
+            return f"{output.output}{saved_info}"
 
         from langchain_agent.tools import get_tool_function
 
@@ -137,7 +140,7 @@ def parse_command(user_input: str) -> tuple[str | None, str]:
         return None, handle_approve(request_id)
 
     if user_input.startswith("/deny "):
-        request_id = user_input[5:].strip()
+        request_id = user_input[6:].strip()
         return None, handle_deny(request_id)
 
     if user_input.startswith("/approve-all "):

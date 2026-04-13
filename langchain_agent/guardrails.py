@@ -95,7 +95,8 @@ def _is_hostname_blocked(hostname: str) -> tuple[bool, str]:
             if is_blocked_ip(ip):
                 return True, f"Internal URL target '{hostname}' is not allowed"
     else:
-        if hostname_lower in ("127.0.0.1", "localhost"):
+        blocked_localhosts = ("127.0.0.1", "localhost", "localhost.localdomain")
+        if hostname_lower in blocked_localhosts:
             return True, f"Blocked target: '{hostname_lower}' is not allowed"
 
     return False, ""

@@ -17,6 +17,7 @@ flowchart LR
     TOOLS --> NM[run_nmap]
     TOOLS --> NU[run_nuclei]
     TOOLS --> RL[rate_limiter.py]
+    TOOLS --> AQ[approval_queue.py]
     MAIN --> CONFIG[config.yaml]
     MAIN --> LOG[(logs/agent.log)]
     
@@ -217,6 +218,12 @@ sequenceDiagram
 
 ### langchain_agent/rate_limiter.py
 - Per-tool rate limiting
+- Thread-safe using `threading.Lock()`
+
+### langchain_agent/approval_queue.py
+- Approval request management with thread-safe operations
+- `chain_state` stored with request (for future chain resume)
+- `reset()` method for test cleanup
 
 ### langchain_agent/config.py
 - Model/host configuration
@@ -289,6 +296,16 @@ Nuclei scan complete. Results saved to: /path/to/file
 ```
 
 Empty results are reported as "No vulnerabilities found" instead of blank output.
+
+## Recent Improvements (2026-04)
+
+- Thread-safe ApprovalQueue and RateLimiter using `threading.Lock()`
+- HTTP error handling in `call_api` now properly propagates 4xx/5xx errors
+- Nuclei output flushed to disk before reading (fixes race condition)
+- Chain depth increments by 1 per execution cycle (not per tool_call)
+- Output sanitization removes control characters from tool results
+- Enhanced hostname blocking includes `localhost.localdomain`
+- `reset()` method added to ApprovalQueue for test cleanup
 
 ## Future Extensibility
 

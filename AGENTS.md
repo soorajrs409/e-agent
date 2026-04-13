@@ -90,6 +90,15 @@ uv venv .venv && source .venv/bin/activate && uv pip install -r requirements.txt
 
 Requires: `langchain`, `langchain-core`, `langchain-ollama`, `langgraph`
 
+## Recent Improvements (2026-04)
+
+- Thread-safe ApprovalQueue and RateLimiter using `threading.Lock()`
+- HTTP error handling in `call_api` now properly propagates 4xx/5xx errors
+- Nuclei output flushed to disk before reading (fixes race condition)
+- Chain depth increments by 1 per execution cycle (not per tool_call)
+- Output sanitization removes control characters from tool results
+- Enhanced hostname blocking includes `localhost.localdomain`
+
 ## Tool Usage Guidelines
 
 The agent uses LangGraph for multi-tool chains:

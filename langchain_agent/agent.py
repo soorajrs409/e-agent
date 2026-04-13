@@ -11,6 +11,7 @@ from langchain_agent.tools import (
     ToolEvent,
     ToolOutput,
     get_tool_function,
+    _sanitize_output,
 )
 
 logger = logging.getLogger(__name__)
@@ -253,26 +254,28 @@ def create_langgraph_agent(event_callback=None):
                     if result.status == "success":
                         if event_callback:
                             event_callback(ToolEvent(tool_name, "completed"))
-                        tool_results.append(result.output)
+                        tool_results.append(_sanitize_output(result.output))
                     else:
                         if event_callback:
                             event_callback(
                                 ToolEvent(tool_name, "failed", result.output)
                             )
-                        tool_results.append(f"[error] {result.output}")
+                        tool_results.append(
+                            f"[error] {_sanitize_output(result.output)}"
+                        )
                         last_error = result.output
                         break
                 else:
                     if event_callback:
                         event_callback(ToolEvent(tool_name, "completed"))
-                    tool_results.append(str(result))
+                    tool_results.append(_sanitize_output(str(result)))
 
             except Exception as e:
                 error_msg = str(e)
                 if event_callback:
                     event_callback(ToolEvent(tool_name, "failed", error_msg))
-                tool_results.append(f"[error] {error_msg}")
-                last_error = error_msg
+                tool_results.append(f"[error] {_sanitize_output(error_msg)}")
+                last_error = error_msg  # Keep unsanitized for internal use
                 break
 
         if tool_results:
@@ -285,7 +288,7 @@ def create_langgraph_agent(event_callback=None):
         return {
             "messages": messages,
             "tool_results": tool_results,
-            "chain_depth": state.get("chain_depth", 0) + len(tool_calls),
+            "chain_depth": state.get("chain_depth", 0) + 1,
             "retry_count": 0,
             "last_error": last_error,
             "pending_approval": approval_needed,

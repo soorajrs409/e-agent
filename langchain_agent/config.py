@@ -43,7 +43,8 @@ GUARDRAILS_MAX_INPUT_LENGTH = _config.get("guardrails", {}).get(
     "max_input_length", 5000
 )
 GUARDRAILS_BLOCKED_TARGETS = _config.get("guardrails", {}).get(
-    "blocked_targets", ["127.0.0.1", "localhost", "169.254.169.254"]
+    "blocked_targets",
+    ["127.0.0.1", "localhost", "localhost.localdomain", "169.254.169.254"],
 )
 GUARDRAILS_NMAP_ALLOWED_FLAGS = (
     _config.get("guardrails", {})

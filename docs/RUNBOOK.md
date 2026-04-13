@@ -226,6 +226,7 @@ guardrails:
   blocked_targets:
     - "127.0.0.1"
     - "localhost"
+    - "localhost.localdomain"
     - "169.254.169.254"
   nmap:
     allowed_flags: ["-sV", "-sS", "-Pn", "-F", "-O"]

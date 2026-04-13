@@ -84,6 +84,11 @@ def _sanitize_filename(url: str) -> str:
     return filename
 
 
+def _sanitize_output(text: str) -> str:
+    """Remove potentially problematic control characters from tool output."""
+    return re.sub(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]", "", text)
+
+
 @tool
 def read_file(file_path: str) -> ToolOutput:
     """Read file contents from disk within sandbox."""
@@ -161,6 +166,7 @@ def call_api(url: str) -> ToolOutput:
 
     try:
         r = requests.get(url, timeout=TOOL_CALL_API_TIMEOUT)
+        r.raise_for_status()
         content = r.text
 
         saved_path = None
@@ -180,6 +186,13 @@ def call_api(url: str) -> ToolOutput:
             tool="call_api",
             output=content,
             saved_to=saved_path,
+        )
+    except requests.exceptions.HTTPError as e:
+        return ToolOutput(
+            status="error",
+            tool="call_api",
+            output=f"HTTP error: {e.response.status_code} {e.response.reason}",
+            saved_to=None,
         )
     except Exception as e:
         return ToolOutput(
@@ -436,7 +449,10 @@ def _execute_nuclei(target: str, options: str) -> ToolOutput:
                 saved_to=None,
             )
 
-        output = output_file.read_text() if output_file.exists() else ""
+        with open(output_file, "r") as f:
+            f.flush()
+            os.fsync(f.fileno())
+            output = f.read()
         if not output.strip():
             output = "No vulnerabilities found."
 

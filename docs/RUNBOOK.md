@@ -1,60 +1,31 @@
 # Runbook
 
-Operational guide for running and troubleshooting the local CLI agent and tool server.
-
-## Services
-
-You need these processes:
-
-1. Ollama API
-2. FastAPI tool server
-3. CLI agent
-
-Start them in that order.
+Operational guide for running and troubleshooting the e-agent.
 
 ## Startup Order
 
 ### 1. Create the environment
 
 ```bash
-python -m venv .venv
+uv venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
-
-The dependency set now includes `pyyaml`, which is required for dynamic prompt tool rendering.
 
 ### 2. Start Ollama
 
 ```bash
 ollama serve
-ollama pull llama3
+ollama pull llama3.1
 ```
 
-### 3. Start the tool server
-
-```bash
-uvicorn server:app --app-dir tool-servers/core_server --host 127.0.0.1 --port 8001 --reload
-```
-
-### 4. Start the CLI agent
+### 3. Start the CLI agent
 
 ```bash
 python main.py
 ```
 
-## Important Startup Note
-
-The cleanest startup order is still tool server first, then CLI, because the agent needs tool discovery for the best prompt on first request.
-
-- start the tool server before `python main.py`
-- then start the CLI agent
-
-Current behavior is more forgiving than before:
-
-- the runtime now builds the prompt lazily
-- if cached discovery is empty, the agent can force a refresh and rebuild the prompt
-- if the agent already has a non-empty cached tool list, restarting the CLI is still the safest option after tool-server outages or tool-list changes
+Type `exit` to quit.
 
 ## Quick Health Checks
 
@@ -66,135 +37,229 @@ curl -s http://127.0.0.1:11434/api/tags
 
 Expected: JSON with locally available model tags.
 
-### Tool server
+### Import verification
 
 ```bash
-curl -s http://127.0.0.1:8001/tools
+source .venv/bin/activate
+python -c "from langchain_agent import agent; print('OK')"
 ```
 
-Expected shape:
-
-```json
-{
-  "tools": [
-    {
-      "name": "read_file",
-      "description": "Read file contents from disk",
-      "args": ["file_path"]
-    },
-    {
-      "name": "call_api",
-      "description": "Make HTTP GET request to a URL",
-      "args": ["url"]
-    },
-    {
-      "name": "run_nmap",
-      "description": "Run network scan to find open ports/services",
-      "args": ["target", "options"]
-    }
-  ]
-}
-```
-
-## Manual Endpoint Checks
-
-### `read_file`
+### LangGraph agent creation
 
 ```bash
-curl -s -X POST http://127.0.0.1:8001/tools/read_file \
-  -H 'Content-Type: application/json' \
-  -d '{"file_path":"README.md"}'
+source .venv/bin/activate
+python -c "from langchain_agent.agent import create_langgraph_agent; print('OK')"
 ```
 
-### `call_api`
+## Tool Chaining
+
+### Approving tools that require approval
+
+When the agent runs a tool that requires approval:
+
+```
+[*] Running run_nuclei...
+[✗] run_nuclei failed: approval required
+[approval_required] Use /approve abc123 to execute this command.
+```
+
+Approve the single tool:
 
 ```bash
-curl -s -X POST http://127.0.0.1:8001/tools/call_api \
-  -H 'Content-Type: application/json' \
-  -d '{"url":"https://example.com"}'
+/approve abc123
 ```
 
-### `run_nmap`
+After approval, the scan runs with live output streaming to the terminal.
+Nuclei shows its banner, template loading progress, and findings as they
+are discovered. Nmap shows port scan results line by line.
+
+Note: After approval, only the approved tool runs. If the request was part
+of a multi-tool chain, the chain does not resume automatically. Re-issue
+the original prompt to continue.
+
+### Checking pending approvals
+
+Currently there is no CLI command to list pending approvals. The agent
+displays the request ID when approval is needed. Use `/approve <id>` or
+`/deny <id>` with the displayed ID.
+
+### Auto-approve all requests
+
+For testing, auto-approve a tool:
 
 ```bash
-curl -s -X POST http://127.0.0.1:8001/tools/run_nmap \
-  -H 'Content-Type: application/json' \
-  -d '{"target":"scanme.nmap.org","options":"-F"}'
+/approve-all run_nmap
+/approve-all run_nuclei
 ```
 
-Notes:
+This allows all requests of that type without manual approval.
 
-- the route is currently exposed and should not return `404`
-- only these options are accepted: `-sV`, `-sS`, `-Pn`, `-F`, `-O`
-- agent-side guardrails still block scan targets like `localhost` and `169.254.169.254`
+## Live Tool Events
 
-## Common Failures
+The agent streams tool lifecycle events:
 
-### The agent answers normally but never uses tools
+```
+[*] Running read_file...        # Tool started
+[✓] read_file completed         # Success
+[*] Running run_nmap...          # Next tool started
+[✗] run_nmap failed: <error>    # Failure
+```
 
-Check these first:
+For nmap and nuclei, scan output streams live during `/approve` execution.
+Results are also saved to `sandbox/scans/`. Empty results are reported as
+"No vulnerabilities found".
 
-- the tool server was running before the CLI started
-- `http://127.0.0.1:8001/tools` returns a valid tool list
-- restart the CLI if the tool server came up after the CLI
+## Troubleshooting
 
-Why this happens:
+### Connection refused to Ollama
 
-- tool discovery may have returned an empty list earlier
-- discovered tools are cached in `TOOLS_CACHE`
-- the prompt only force-refreshes when cached discovery is empty
-- newly added tools on an already healthy cache still require a process restart
+- Confirm `ollama serve` is running
+- Verify `langchain_agent/config.py` has `OLLAMA_HOST = "http://127.0.0.1:11434"`
+- CLI prints `[OLLAMA ERROR]` on connection failure
 
-### `Connection refused` to Ollama
+### Agent doesn't use tools
 
-- confirm `ollama serve` is running
-- verify `agent/config.py` points to `http://127.0.0.1:11434`
-- current CLI behavior should print `[-] [OLLAMA ERROR] ...` instead of crashing the session
+- Verify tools are bound: `python -c "from langchain_agent.tools import tools; print([t.name for t in tools])"`
+- Check model supports tool calling (llama3.1+ recommended)
+- The 8B quantized model may hallucinate tool calls (wrong parameters, calling tools for conversational input) — a larger model (70B+) produces more reliable results
 
-### `Connection refused` to the tool server
+### LLM calls wrong tool or wrong parameters
 
-- confirm the uvicorn process is running on port `8001`
-- verify `agent/mcp_client.py` includes `http://127.0.0.1:8001` in `MCP_SERVERS`
+- The agent uses a system prompt with exact parameter names to guide tool selection
+- If the model calls `call_api` with `target` instead of `url`, or calls `call_api` instead of `run_nuclei` for vulnerability scanning, this is an LLM limitation
+- Upgrading to a larger model (e.g. `llama3.1:70b`) improves tool selection accuracy
+- The system prompt lists tool parameter names explicitly to minimize hallucination
 
-### Tool execution prints `TOOL ERROR`
+### Scan shows no output during approval
 
-- inspect the tool server console for request failures
-- verify the endpoint returns JSON and not an HTML error page
-- confirm local dependencies like `nmap` are installed if using `run_nmap`
-- if multiple MCP servers are configured, the client now skips failing servers and keeps trying the next one
+- nmap and nuclei stream output live to the terminal during `/approve`
+- If you see only `[*] Executing run_nuclei (this may take a while)...` with no further output, the scan is running but may take time to find results
+- Nuclei output (banner, progress, findings) streams from both stdout and stderr
+- If a scan finds no vulnerabilities, it reports "No vulnerabilities found"
 
-### Tool invocation does not trigger even though the model tried
+### Empty file when reading scan results
 
-- the agent scans the buffered response for decodable JSON objects containing a `tool` key
-- malformed mixed output can still fall back to normal text output
-- fenced-code or clean JSON payloads are more reliable than prose mixed with partial JSON
+- If nuclei finds zero vulnerabilities, the results file will be empty and `read_file` reports "(File is empty: ...)"
+- This is correct behavior — the scan completed but found nothing
 
-### `run_nmap` is rejected
+### Input rejected
 
-Possible causes:
+- Check if input exceeds `guardrails.max_input_length` in config.yaml
+- Check for blocked prompt injection phrases
 
-- the target contains `127.0.0.1`
-- the target contains `localhost`
-- the target contains `169.254.169.254`
-- the options include a flag outside the allowlist
+### Tool blocked
+
+- Target contains blocked address — guardrails resolve hostnames via DNS and check resolved IPs against blocked ranges (`127.0.0.0/8`, `::1`, `0.0.0.0`, `169.254.0.0/16`)
+- Alternate IP representations (hex, octal, decimal, IPv6-mapped) are also blocked via DNS resolution
+- Hostnames matching blocked targets use boundary matching (e.g., `not-localhost.com` is allowed, `localhost` is blocked)
+- Options include flag outside `guardrails.nmap.allowed_flags`
+- Check error message for specific reason
+
+### Rate limited
+
+- Exceeded `guardrails.rate_limit.max_per_minute` for that tool
+
+### Chain too long
+
+If a chain exceeds 5 tools, the chain ends after the 5th tool. Any
+remaining tools are not executed. Re-issue the command to continue.
+
+### Approval expired
+
+Approval requests expire (default 5 minutes, configurable in `config.yaml`):
+
+```
+Request abc123 has expired. Please re-issue the command.
+```
+
+### Error during chain
+
+On tool error, the chain terminates:
+
+```
+[error] Error: Disallowed switch '-T4'
+```
+
+Re-issue the command with corrected parameters.
 
 ## Logs
 
 ### Agent log
 
 - path: `logs/agent.log`
-- current behavior: logs user messages only
+- logs user messages with timestamp
 
-### Server logs
+### Scan outputs
 
-- emitted by the uvicorn process to stdout/stderr
+- path: `sandbox/scans/nmap-*.txt`
+- path: `sandbox/scans/nuclei-*.txt`
 
-## Operational Notes
+## Configuration
 
-- `call_tool()` tries each configured MCP server in sequence.
-- `discover_tools()` caches tool metadata for the duration of the process.
-- `discover_tools(force_refresh=True)` is used when the runtime needs to rebuild the prompt after empty discovery.
-- `call_api` performs a simple HTTP GET and returns raw text without explicit HTTP-status handling.
-- Tool output is filtered for selected sensitive phrases before display.
-- top-level CLI and Ollama errors are handled more gracefully and should not terminate the session immediately.
-- This stack is a local development prototype and should not be exposed publicly without authentication and tighter policy controls.
+Configuration in `config.yaml`:
+
+```yaml
+model:
+  name: "llama3.1"
+  ollama_host: "http://127.0.0.1:11434"
+
+agent:
+  name: "electron-agent"
+  log_file: "logs/agent.log"
+
+sandbox:
+  path: "./sandbox"
+  directories: ["scans", "downloads", "temp"]
+
+tools:
+  auto: [read_file, call_api]
+  approval_required: [run_nmap, run_nuclei]
+  call_api:
+    timeout: 20
+  nmap:
+    timeout: 600
+  nuclei:
+    timeout: 600
+
+guardrails:
+  max_input_length: 5000
+  blocked_targets:
+    - "127.0.0.1"
+    - "localhost"
+    - "169.254.169.254"
+  nmap:
+    allowed_flags: ["-sV", "-sS", "-Pn", "-F", "-O"]
+  rate_limit:
+    enabled: true
+    max_per_minute: 30
+
+logging:
+  rotation_days: 7
+  backup_count: 7
+```
+
+## Chain State Debugging
+
+To see chain state during execution:
+
+```python
+from langchain_agent.agent import stream_agent
+from langchain_agent.tools import ToolEvent
+
+def debug_cb(e: ToolEvent):
+    print(f"EVENT: {e.format()}")
+
+# Run with debug output
+for chunk in stream_agent("your prompt", event_callback=debug_cb):
+    print(chunk)
+```
+
+## Commands Summary
+
+| Command | Description |
+|---------|-------------|
+| `python main.py` | Start agent |
+| `exit` | Quit |
+| `/approve <id>` | Approve pending request |
+| `/deny <id>` | Deny pending request |
+| `/approve-all <tool>` | Auto-approve all of tool type |

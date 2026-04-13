@@ -1,232 +1,299 @@
 # Architecture
 
-This project runs as a two-process local system:
-
-- Process 1: CLI agent for prompt orchestration and policy checks
-- Process 2: FastAPI tool server for external actions
+This project uses LangGraph for tool chaining orchestration with Ollama.
 
 ## High-Level Topology
 
 ```mermaid
 flowchart LR
     U[User Terminal] --> MAIN[main.py]
-    MAIN --> CORE[agent/core.py]
-    CORE --> GUARD[agent/guardrails.py]
-    CORE --> OLLAMA[Ollama Chat API]
-    CORE --> MCPCLIENT[agent/mcp_client.py]
-    MCPCLIENT --> MCPSERVER[FastAPI Tool Server]
-    MCPSERVER --> TOOL1[read_file]
-    MCPSERVER --> TOOL2[call_api]
-    MCPSERVER --> TOOL3[run_nmap]
+    MAIN --> GUARD[guardrails.py]
+    MAIN --> AGENT[agent.py]
+    AGENT --> LLM[ChatOllama]
+    AGENT --> GRAPH[LangGraph StateGraph]
+    GRAPH --> TOOLS[tools.py]
+    TOOLS --> RF[read_file]
+    TOOLS --> CA[call_api]
+    TOOLS --> NM[run_nmap]
+    TOOLS --> NU[run_nuclei]
+    TOOLS --> RL[rate_limiter.py]
+    MAIN --> CONFIG[config.yaml]
     MAIN --> LOG[(logs/agent.log)]
+    
+    subgraph langchain_agent[langchain_agent]
+        GUARD
+        AGENT
+        GRAPH
+        TOOLS
+        RL
+    end
 ```
 
-## Prompt Assembly And Refresh
+## LangGraph Tool Chaining Architecture
 
-The current implementation builds the system prompt lazily on demand, then reuses it. If discovery returns no tools, the agent can force a refresh and rebuild the prompt.
-
-```mermaid
-flowchart TD
-    A["agent_stream_chat"] --> B["get_system_prompt"]
-    B --> C{"system_prompt cached?"}
-    C -- no --> D["discover_tools(force_refresh=True)"]
-    C -- yes --> E["discover_tools(from cache)"]
-    E --> F{"tools empty?"}
-    F -- yes --> D
-    F -- no --> G["reuse cached prompt"]
-    D --> H["build_tools_section"]
-    H --> I["BASE_SYSTEM_PROMPT + YAML tool section"]
-    I --> J["cache system_prompt"]
-    J --> K["return prompt"]
-    G --> K
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     main.py (CLI Loop)                       │
+└─────────────────────┬───────────────────────────────────────┘
+                    │
+        ┌───────────┴───────────┐
+        ▼                   ▼
+   guardrails.py     stream_agent()
+                          │
+                          ▼
+               ┌────────────────────┐
+               │ LangGraph Agent    │
+               ├────────────────────┤
+               │ greeting_check()   │──→ decides: greeting or continue
+               │ greeting_response()│──→ direct reply for greetings
+               │ should_continue() │──→ decides: continue or END
+               │ call_llm()         │──→ calls ChatOllama
+               │ execute_tool_node()│──→ executes tools + emits events
+               └────────────────────┘
+                          │
+               ┌────────────┴────────────┐
+               ▼                         ▼
+          Tool Events          Tool Results
+          (callback)           (to LLM)
 ```
 
-Starting the tool server before the CLI still gives the cleanest startup. The runtime can recover from an earlier empty discovery attempt, but it does not automatically refresh a healthy non-empty cache when the server's tool list changes later.
+## Tool Chaining Flow
 
-## Request Lifecycle
+```
+┌─────────────────────────────────────────────────────────────┐
+│  User: "scan server and check for vulns"                    │
+└─────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+              ┌───────────────────────┐
+              │  greeting_check()      │
+              │  → "continue" (not a  │
+              │    greeting)          │
+              └───────────────────────┘
+                          │
+                          ▼
+              ┌───────────────────────┐
+              │  LLM decides: 2 tools  │
+              │  1. run_nmap          │
+              │  2. run_nuclei        │
+              └───────────────────────┘
+                          │
+           ┌───────────────┼───────────────┐
+           ▼               ▼               ▼
+     Tool 1 runs       Error?          Approval?
+     + events        ↓↓                   ↓↓
+     output ──►   chain stops    chain pauses
+     to LLM                       /approve X
+     ↓↓                           (single tool
+     Tool 2                        only)
+     ...
+```
+
+## Agent State (TypedDict)
+
+```python
+class AgentState(TypedDict):
+    messages: list[BaseMessage]      # conversation history
+    tool_results: list[str]          # outputs from each tool
+    chain_depth: int                 # tools executed so far
+    pending_approval: dict | None    # approval state if paused
+    retry_count: int                 # reserved (currently unused)
+    last_error: str | None          # set on error → terminates chain
+```
+
+## Key Components
+
+### ChatOllama
+- Connects to local Ollama instance
+- Handles chat completions with streaming support
+
+### LangGraph StateGraph
+- Tool calling with explicit state management
+- Greeting detection bypasses tools for casual input
+- Max chain length: 5 tools (enforced)
+- Errors terminate the chain (no retry)
+
+### ToolEvent System
+```python
+class ToolEvent:
+    def __init__(self, tool_name: str, event_type: str, message: str = ""):
+        self.tool_name = tool_name    # which tool
+        self.event_type = event_type  # "started", "completed", "failed"
+        self.message = message        # error message if failed (default: "")
+        self.timestamp = datetime.now().isoformat()  # set automatically
+```
+
+### @tool Decorated Functions
+- Auto-generate JSON schemas for prompts
+- Return ToolOutput pydantic model
+
+## Request Lifecycle with Tool Chaining
 
 ```mermaid
 sequenceDiagram
     participant User
     participant Main as main.py
-    participant Core as agent/core.py
-    participant Guard as agent/guardrails.py
-    participant LLM as Ollama
-    participant MCP as agent/mcp_client.py
-    participant Server as tool server
+    participant Agent as LangGraph Agent
+    participant LLM as ChatOllama
+    participant Tool as @tool function
 
-    User->>Main: prompt
-    Main->>Main: log USER entry
-    Main->>Core: agent_stream_chat(prompt)
-    Core->>Guard: validate_user_input
-
-    alt blocked
-        Guard-->>Core: False + reason
-        Core-->>User: guard block message
-    else allowed
-        Guard-->>Core: True
-        Core->>LLM: chat(stream=True)
-        LLM-->>Core: streamed chunks
-        Core->>Core: buffer full response
-        Core->>Core: decode JSON candidates from response text
-
-        alt valid tool JSON found
-            Core->>Guard: validate_tool_call
-            alt blocked tool request
-                Guard-->>Core: False + reason
-                Core-->>User: guard block message
-            else allowed
-                Core->>MCP: POST /tools/{tool}
-                MCP->>Server: HTTP request with args
-                alt server returns success payload
-                    Server-->>MCP: JSON output payload
-                    MCP-->>Core: parsed response
-                else server fails
-                    Server-->>MCP: error, bad status, or invalid body
-                    MCP->>Server: try next configured MCP server
-                end
-                Core->>Guard: filter_output(output)
-                Core-->>User: print tool result
-            end
-        else no valid tool JSON
-            Core-->>User: print normal model response
-        end
+    User->>Main: "scan 1.2.3.4 and check vulns"
+    Main->>Agent: stream_agent(prompt, event_callback)
+    
+    rect rgb(240, 248, 255)
+        Note over Agent: greeting_check() → "continue"
+        Agent->>LLM: chat completion + tools
+        LLM-->>Agent: tool_calls = [run_nmap]
+        Note over Agent: should_continue() → "continue"
+        Agent->>Tool: execute run_nmap
+        Tool-->>Agent: tool_result
+        Note over Agent: emit ToolEvent("started")
+        Note over Agent: emit ToolEvent("completed")
     end
-```
-
-## Agent Internal Flow
-
-```mermaid
-flowchart TD
-    A[User input] --> B{Input valid?}
-    B -- no --> C[Print guard message and stop]
-    B -- yes --> D[Get or rebuild system_prompt]
-    D --> E{Ollama request succeeds?}
-    E -- no --> F[Print Ollama error]
-    E -- yes --> G[Buffer streamed response]
-    G --> H{Valid tool JSON found?}
-    H -- no --> I[Print plain response]
-    H -- yes --> J{Tool call allowed?}
-    J -- no --> K[Print block message]
-    J -- yes --> L[call_tool via MCP client]
-    L --> M{Any MCP server returns valid output?}
-    M -- no --> N[Print tool error]
-    M -- yes --> O[Filter output and print]
-```
-
-## Deployment Boundary
-
-```mermaid
-flowchart LR
-    subgraph Agent_Runtime[Agent Runtime]
-      MAIN[main.py]
-      CORE[agent/core.py]
-      BASE[base_prompt.py]
-      PB[prompt_builder.py]
-      GUARD[guardrails.py]
-      MCPCLIENT[mcp_client.py]
+    
+    rect rgb(240, 248, 255)
+        Note over Agent,LLM: Chain iteration 2
+        Agent->>LLM: continue with result
+        LLM-->>Agent: tool_calls = [run_nuclei]
+        Note over Agent: should_continue() → "continue"
+        Agent->>Tool: execute run_nuclei
+        Tool-->>Agent: approval_required
     end
-
-    subgraph Tool_Runtime[Tool Server Runtime]
-      API[FastAPI app]
-      LIST[GET /tools]
-      RF[POST /tools/read_file]
-      CA[POST /tools/call_api]
-      NM[POST /tools/run_nmap]
+    
+    rect rgb(255, 240, 240)
+        Note over Agent: Approval needed
+        Note over Agent: pending_approval set
+        Note over Agent: should_continue() → "end"
+        Agent-->>Main: approval request
+        Main-->>User: Use /approve X
     end
-
-    CORE --> BASE
-    CORE --> PB
-    CORE --> GUARD
-    CORE --> MCPCLIENT
-    MCPCLIENT --> API
-    API --> LIST
-    API --> RF
-    API --> CA
-    API --> NM
+    
+    rect rgb(240, 255, 240)
+        Note over User,Main: On approval (single tool only, chain does not resume)
+        User->>Main: /approve X
+        Main->>Tool: execute approved tool
+    end
+    
+    Main-->>User: display + tool events
 ```
 
 ## Module Responsibilities
 
-- `main.py`
-  - starts the CLI loop
-  - logs user inputs
-  - delegates each prompt to `agent_stream_chat`
-- `agent/core.py`
-  - builds and refreshes the system prompt from discovered tools
-  - validates user input
-  - calls Ollama with request-level error handling
-  - extracts and dispatches tool calls
-  - filters and prints tool output
-- `agent/base_prompt.py`
-  - defines the base tool-usage policy and JSON output rules
-- `agent/prompt_builder.py`
-  - converts discovered tools into YAML for prompt injection
-- `agent/mcp_client.py`
-  - discovers tools from one or more MCP servers
-  - caches discovered tool metadata
-  - executes tool POST requests with retry/failover across configured servers
-- `agent/guardrails.py`
-  - blocks common prompt-injection phrases
-  - blocks selected scan targets
-  - filters sensitive phrases from output
-- `tool-servers/core_server/server.py`
-  - publishes tool metadata
-  - implements `read_file`, `call_api`, and `run_nmap`
+### main.py
+- CLI loop with input/output
+- Logging to `logs/agent.log`
+- Delegates to LangGraph agent
+- Event callback for tool lifecycle display
+- `/approve` and `/deny` command handling with live scan output streaming
 
-## Interface Contracts
+### langchain_agent/agent.py
+- `ChatOllama` initialization
+- `create_langgraph_agent()` factory
+- `stream_agent(event_callback)` with events
+- `invoke_agent()` for blocking calls
+- Tool execution state management
+- Greeting detection for casual input
+- System prompt guides LLM tool selection and parameter names
 
-### Model To Agent
+### langchain_agent/tools.py
+- `@tool` decorated functions with detailed descriptions to guide LLM tool selection
+- `ToolEvent` class for lifecycle events
+- `get_tool_function()` lookup
+- `_sanitize_filename()` for safe download filenames from URLs
+- nmap/nuclei scans stream output live via `subprocess.Popen` with `stderr=subprocess.STDOUT`
+- Empty scan results reported as "No vulnerabilities found"
 
-Expected tool payload:
+### langchain_agent/guardrails.py
+- `validate_input()`: length + injection detection
+- `validate_url()`: scheme check, empty hostname check, DNS resolution + CIDR blocking
+- `validate_nmap_target()` / `validate_nuclei_target()`: hostname-boundary matching + DNS resolution + CIDR blocking
+- `resolve_host_to_ips()`: DNS resolution with timeout, returns list of IPs
+- `is_blocked_ip()`: checks IPs against blocked ranges using `ipaddress` module
+- `_is_hostname_blocked()`: shared hostname blocking logic (DNS + string fallback)
 
-```json
-{
-  "tool": "<tool_name>",
-  "args": {
-    "key": "value"
-  }
-}
+### langchain_agent/approval_queue.py
+- Approval request management
+- `chain_state` stored with request (for future chain resume)
+
+### langchain_agent/rate_limiter.py
+- Per-tool rate limiting
+
+### langchain_agent/config.py
+- Model/host configuration
+- Guardrails from config.yaml
+
+## Tool Output Format
+
+All tools return standardized `ToolOutput`:
+
+```python
+class ToolOutput(BaseModel):
+    status: str             # "success", "error", "blocked", "approval_required"
+    tool: str               # tool name
+    output: str             # result message
+    saved_to: str | None    # file path if saved
 ```
 
-The active prompt is built from `BASE_SYSTEM_PROMPT` and the discovered tool YAML. `agent/prompt.py` is still present in the repo, but it is not the primary runtime prompt source.
+Tools requiring approval return an `ApprovalRequired` model with a
+`request_id` that the user must approve via `/approve <id>`.
 
-### Agent To Tool Server
+## Security
 
-- request path: `POST /tools/<tool_name>`
-- request body: tool args as JSON
-- success response: `{ "output": ... }`
-- error response: `{ "error": ... }`
+- Input: max 5000 chars, prompt injection detection
+- Target validation: DNS resolution (`socket.getaddrinfo`) detects alternate IP representations (hex, octal, decimal, IPv6-mapped)
+- Blocked CIDR ranges: `127.0.0.0/8`, `::1/128`, `::ffff:127.0.0.0/104`, `0.0.0.0/32`, `169.254.0.0/16`
+- Hostname-boundary matching avoids false positives (e.g., `not-localhost.com` allowed)
+- Empty/null hostname in URLs rejected
+- nmap/nuclei: target blocking via DNS + CIDR resolution
+- nmap: flag allowlist (`-sV`, `-sS`, `-Pn`, `-F`, `-O`)
+- call_api: URL scheme + internal targeting blocks + filename sanitization
+- Rate limiting: per-tool limits
+- Max chain: 5 tools to prevent runaway
 
-### Tool Discovery Format
+## Live Streaming
 
-`GET /tools` returns:
+Tool events stream during execution:
 
-```json
-{
-  "tools": [
-    {
-      "name": "read_file",
-      "description": "Read file contents from disk",
-      "args": ["file_path"]
-    }
-  ]
-}
+```
+[*] Running run_nmap...
+[Port scan results...]
+[✓] run_nmap completed
+[*] Running run_nuclei...
+[vuln results...]
+[✓] run_nuclei completed
 ```
 
-The client adds a `server` field to each discovered tool entry before caching it. Discovery can also be force-refreshed when the runtime needs to rebuild the prompt.
+Approval flow with live scan output:
+```
+[*] Running run_nuclei...
+[✗] run_nuclei failed: approval required
+[approval_required] Use /approve abc123
+```
 
-## Security And Guardrails
+After `/approve`, the scan runs with live output streaming:
+```
+[+] you -> /approve abc123
+[*] Executing run_nuclei (this may take a while)...
 
-- Input filtering blocks known prompt-injection strings.
-- `run_nmap` targets are blocked if they include `127.0.0.1`, `localhost`, or `169.254.169.254`.
-- `run_nmap` options are restricted server-side to `-sV`, `-sS`, `-Pn`, `-F`, and `-O`.
-- Output filtering replaces responses containing selected sensitive phrases.
+                     __     _
+   ____  __  _______/ /__  (_)
+  / __ \/ / / / ___/ / _ \/ /
+ / / / / /_/ / /__/ /  __/ /
+/_/ /_/\__,_/\___/_/\___/_/   v3.7.0
 
-## Current Limitations
+[INF] Templates loaded for current scan: 6444
+[INF] Targets loaded for current scan: 1
+[CVE-2021-44228] http://target/...
+Nuclei scan complete. Results saved to: /path/to/file
+[Saved to: /path/to/file]
+```
 
-1. Tool discovery is cached for the lifetime of the process. The runtime only force-refreshes when the cache is empty, so prompt-visible tool changes on an already healthy server require an agent restart.
-2. The Ollama response is buffered completely before any user-visible output is printed, even though streaming is enabled upstream.
-3. Logging currently captures user inputs only.
-4. `call_api` performs a raw GET and returns the response body as text without additional policy, shaping, or explicit HTTP-status handling.
-5. `agent/prompt.py` remains as an older prompt definition and may confuse future maintenance unless it is removed or clearly deprecated.
+Empty results are reported as "No vulnerabilities found" instead of blank output.
+
+## Future Extensibility
+
+The architecture supports:
+- Adding more tools
+- Custom chain termination conditions
+- Parallel tool execution (future)
+- Conversation memory

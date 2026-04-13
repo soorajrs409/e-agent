@@ -1,0 +1,76 @@
+# e-agent Configuration
+
+# Model Settings
+model:
+  name: "llama3.1"
+  ollama_host: "http://127.0.0.1:11434"
+
+# Agent Settings
+agent:
+  name: "electron-agent"
+  log_file: "logs/agent.log"
+
+# Sandbox Settings
+sandbox:
+  # Path to sandbox workspace (relative or absolute)
+  # Default: ./sandbox (relative to working directory)
+  path: "./sandbox"
+  # Subdirectories to create
+  directories:
+    - scans
+    - downloads
+    - temp
+
+# Tool Categories
+# Tools in 'auto' run immediately without approval
+# Tools in 'approval_required' need explicit approval
+tools:
+  auto:
+    - read_file
+    - call_api
+  approval_required:
+    - run_nmap
+    - run_nuclei
+  # Tool-specific settings
+  call_api:
+    timeout: 20
+  nmap:
+    timeout: 600
+  nuclei:
+    timeout: 600
+
+# Guardrails Settings
+guardrails:
+  # Maximum input length in characters
+  max_input_length: 5000
+  # Targets that are blocked from scanning
+  blocked_targets:
+    - "127.0.0.1"
+    - "localhost"
+    - "169.254.169.254"
+  # nmap-specific settings
+  nmap:
+    allowed_flags:
+      - "-sV"
+      - "-sS"
+      - "-Pn"
+      - "-F"
+      - "-O"
+  # Rate limiting settings
+  rate_limit:
+    enabled: true
+    max_per_minute: 30
+
+# Approval System Settings
+approval:
+  # Timeout in minutes before pending approval expires
+  timeout_minutes: 5
+  # Enable session-based auto-approval (/approve-all)
+  allow_approve_all: true
+
+# Logging Settings
+logging:
+  # Log rotation interval (days)
+  rotation_days: 7
+  # Number of backup logs to keep
+  backup_count: 7

@@ -13,6 +13,9 @@ env/
 logs/
 *.log
 
+# Sandbox (generated at runtime)
+sandbox/
+
 # OS/editor files
 .DS_Store
 Thumbs.db

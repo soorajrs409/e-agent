@@ -1,130 +1,108 @@
-# AI Agent Dev
+# e-agent
 
-Local CLI AI agent powered by Ollama, with tool execution delegated to a FastAPI-based MCP-style server.
+Local CLI AI agent powered by Ollama with LangGraph for multi-tool chaining.
 
 ## Overview
 
-This project is split into two runtimes:
-
-- The CLI agent handles prompting, guardrails, tool-call detection, and output display.
-- The tool server exposes a small HTTP tool surface for file reads, HTTP fetches, and `nmap` scans.
-
-The current codebase builds the system prompt dynamically by discovering tools from the running tool server and converting them into a YAML tool section. The prompt is initialized lazily and can rebuild itself if the initial tool discovery was empty.
+e-agent uses LangGraph's StateGraph for tool chaining orchestration. It can execute multiple tools sequentially, pass outputs between tools, and stream tool lifecycle events in real-time.
 
 ## Architecture At A Glance
 
 ```mermaid
 flowchart LR
     U[User] --> CLI[main.py]
-    CLI --> CORE[agent/core.py]
-    CORE --> GUARD[agent/guardrails.py]
-    CORE --> OLLAMA[Ollama API]
-    CORE --> MCP[agent/mcp_client.py]
-    MCP --> TS[tool-servers/core_server/server.py]
-    CLI --> LOG[(logs/agent.log)]
+    CLI --> GUARD[guardrails.py]
+    CLI --> AGENT[agent.py]
+    AGENT --> LLM[ChatOllama]
+    AGENT --> GRAPH[LangGraph]
+    GRAPH --> TOOLS[tools.py]
+    
+    GRAPH --> EV[Tool Events]
+    EV --> CLI
+    
+    TOOLS --> TF[read_file]
+    TOOLS --> TA[call_api]
+    TOOLS --> TN[run_nmap]
+    TOOLS --> TNU[run_nuclei]
+    
+    TOOLS --> AQ[Approval Queue]
+    
+    CLI --> SB[sandbox/]
+    SB --> SC[scans/]
+    SB --> DL[downloads/]
+    SB --> TM[temp/]
+    
+    subgraph langchain_agent[langchain_agent]
+        GUARD
+        AGENT
+        GRAPH
+        TOOLS
+        AQ
+    end
 ```
 
-More detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+## Key Features
+
+| Feature | Description |
+|---------|-------------|
+| Multi-tool chains | Execute 2+ tools sequentially |
+| Live streaming | See tool output as it runs |
+| Chain termination | Errors or approval needs stop the chain |
+| Approval integration | Pauses mid-chain for approval |
+| Context passing | Tool outputs feed into next tool |
 
 ## Repository Layout
 
-```text
-.
-├── main.py
-├── requirements.txt
-├── README.md
-├── agent/
-│   ├── base_prompt.py
-│   ├── config.py
-│   ├── core.py
-│   ├── guardrails.py
-│   ├── mcp_client.py
-│   ├── prompt.py
-│   └── prompt_builder.py
-├── docs/
-│   ├── ARCHITECTURE.md
-│   └── RUNBOOK.md
-└── tool-servers/
-    └── core_server/
-        └── server.py
 ```
-
-## Current Runtime Flow
-
-1. `main.py` starts the CLI loop and logs user input to `logs/agent.log`.
-2. `agent/core.py` validates the input with `validate_user_input`.
-3. When handling a request, `agent/core.py` obtains the active system prompt from:
-   - `agent/base_prompt.py`
-   - `agent/prompt_builder.py`
-   - the `/tools` response from the tool server
-4. If no prompt has been built yet, or if the cached tool list is empty, the agent refreshes tool discovery and rebuilds the prompt.
-5. The agent sends the system prompt plus user message to Ollama using streaming.
-6. The full model response is buffered, then scanned for a valid JSON object containing a `tool` key.
-7. If the JSON contains a `tool` key, the agent validates the tool call and sends it to the tool server.
-8. `call_tool()` tries each configured MCP server until it receives a valid success payload.
-9. The tool server returns either `{ "output": ... }` or `{ "error": ... }`.
-10. The agent filters tool output for sensitive phrases and prints the result.
-11. If no valid tool JSON is found, the buffered model response is printed as normal chat output.
-
-## Components
-
-### CLI and Agent
-
-- `main.py`: CLI loop, prompt display, user input logging
-- `agent/core.py`: prompt assembly, prompt refresh, Ollama chat, tool-call parsing, tool dispatch
-- `agent/base_prompt.py`: base system instructions for normal replies vs tool calls
-- `agent/prompt_builder.py`: converts discovered tools into YAML for the prompt
-- `agent/mcp_client.py`: tool discovery and tool execution over HTTP
-- `agent/guardrails.py`: input validation, `run_nmap` target restrictions, output filtering
-- `agent/config.py`: model host/name, agent name, log file path
-
-### Tool Server
-
-`tool-servers/core_server/server.py` exposes:
-
-- `GET /tools`
-- `POST /tools/read_file`
-- `POST /tools/call_api`
-- `POST /tools/run_nmap`
-
-## Tool Discovery
-
-The agent no longer relies on a hardcoded tool list at runtime. Instead:
-
-- `discover_tools()` fetches `/tools` from each configured MCP server
-- discovered tools are cached in `TOOLS_CACHE`
-- `build_tools_section()` renders the discovered tools into YAML
-- the YAML is appended to `BASE_SYSTEM_PROMPT`
-- `get_system_prompt()` rebuilds the prompt if it has not been initialized yet or if cached discovery is empty
-
-Important consequence: starting the tool server before `python main.py` is still the best path. The agent can recover from an earlier empty discovery result, but it does not continuously refresh a healthy non-empty tool cache.
+.
+├── main.py                 # CLI entry point
+├── config.yaml           # Configuration file
+├── requirements.txt      # Python dependencies
+├── README.md
+├── AGENTS.md
+├── sandbox/             # Sandbox workspace
+│   ├── scans/
+│   ├── downloads/
+│   └── temp/
+├── langchain_agent/
+│   ├── __init__.py
+│   ├── agent.py         # LangGraph agent setup
+│   ├── config.py       # Configuration loader
+│   ├── tools.py       # @tool decorated functions + ToolEvent
+│   ├── guardrails.py  # Input/target/URL validation
+│   ├── approval_queue.py  # Approval system + chain state
+│   └── rate_limiter.py  # Rate limiting
+└── docs/
+    ├── ARCHITECTURE.md
+    └── RUNBOOK.md
+```
 
 ## Setup
 
-### 1. Create and activate a virtual environment
+### 1. Create and activate virtual environment
 
 ```bash
-python -m venv .venv
+uv venv .venv
 source .venv/bin/activate
 ```
 
 ### 2. Install dependencies
 
 ```bash
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
 ### 3. Start Ollama
 
 ```bash
 ollama serve
-ollama pull llama3
+ollama pull llama3.1
 ```
 
-### 4. Start the tool server
+### 4. Install Nuclei (optional)
 
 ```bash
-uvicorn server:app --app-dir tool-servers/core_server --host 127.0.0.1 --port 8001 --reload
+go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 ```
 
 ### 5. Start the agent CLI
@@ -135,80 +113,155 @@ python main.py
 
 Type `exit` to quit.
 
-## Configuration
+## Tool Chaining
 
-From `agent/config.py`:
+### Example: Multi-tool chain
 
-- `MODEL_NAME = "llama3"`
-- `OLLAMA_HOST = "http://127.0.0.1:11434"`
-- `AGENT_NAME = "electron-agent"`
-- `LOG_FILE = "logs/agent.log"`
-
-From `agent/mcp_client.py`:
-
-- `MCP_SERVERS = ["http://127.0.0.1:8001"]`
-- `MCP_SERVER = MCP_SERVERS[0]`
-
-## Tool Contract
-
-Expected model tool call:
-
-```json
-{
-  "tool": "read_file",
-  "args": {
-    "file_path": "README.md"
-  }
-}
+```
+[+] you -> scan example.com then check for vulnerabilities
+[*] e-agent -> [*] Running run_nmap...
+[Port scan results...]
+[✓] run_nmap completed
+[*] Running run_nuclei...
+[vuln results...]
+[✓] run_nuclei completed
 ```
 
-Agent-to-server contract:
+### Live Tool Events
 
-- request: `POST /tools/<tool_name>`
-- request body: the `args` object
-- response: `{ "output": ... }` or `{ "error": ... }`
+Tool lifecycle streams to the console:
 
-If multiple MCP servers are configured, tool execution now skips servers that return transport errors, HTTP errors, empty responses, invalid JSON, or JSON error payloads, and continues trying the next server.
+```
+[*] Running read_file...    # Tool started
+[file contents...]
+[✓] read_file completed  # Success
+
+[*] Running run_nmap...   # Next tool started
+[Port results...]
+[✓] run_nmap completed
+
+[*] Running run_nuclei...
+[✗] run_nuclei failed: approval required  # Needs approval
+```
+
+### Approval in Tools
+
+When a tool requires approval:
+
+```
+[+] you -> scan example.com
+[*] Running run_nmap...
+[✗] run_nmap failed: approval required
+[approval_required] Use /approve abc123 to execute this command.
+```
+
+Approving executes only the requested tool (the chain does not resume):
+
+```
+[+] you -> /approve abc123
+Executing run_nmap...
+[✓] run_nmap completed
+```
+
+Note: After approval, only that single tool runs. If you had a multi-step
+request, re-issue the original prompt to continue.
+
+### Error Handling
+
+On tool error, the chain terminates:
+
+```
+[+] you -> scan example.com
+[*] Running run_nmap...
+[✗] run_nmap failed: Disallowed switch -T4
+[error] Disallowed switch -T4
+```
+
+The chain stops. Re-issue the command with corrected parameters.
+
+### Chain Limits
+
+Max 5 tools per chain to prevent runaway. When the limit is reached,
+the chain ends and any remaining tools are not executed. Re-issue the
+command to continue from where it stopped.
+
+## Configuration
+
+Configuration in `config.yaml`:
+
+```yaml
+model:
+  name: "llama3.1"
+  ollama_host: "http://127.0.0.1:11434"
+
+agent:
+  name: "electron-agent"
+  log_file: "logs/agent.log"
+
+sandbox:
+  path: "./sandbox"
+  directories: [scans, downloads, temp]
+
+tools:
+  auto: [read_file, call_api]
+  approval_required: [run_nmap, run_nuclei]
+```
+
+## Available Tools
+
+| Tool | Category | Description |
+|------|----------|-------------|
+| `read_file` | Auto | Read file contents from disk (sandboxed) |
+| `call_api` | Auto | HTTP GET request |
+| `run_nmap` | Approval | Network scan (ports/services) |
+| `run_nuclei` | Approval | Vulnerability scan |
+
+## Approval System
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `/approve <id>` | Approve a pending request |
+| `/deny <id>` | Deny a pending request |
+| `/approve-all <tool>` | Auto-approve all requests |
+
+### Example
+
+```
+[+] you -> scan example.com
+[*] e-agent -> [Using tool: run_nuclei]
+Use /approve abc12345 to execute this command.
+
+[+] you -> /approve abc12345
+Executing run_nuclei...
+[✓] run_nuclei completed
+```
+
+### Auto-approve
+
+```
+[+] you -> /approve-all run_nmap
+All run_nmap commands will now execute without approval for this session.
+```
+
+## Sandbox
+
+All file operations sandboxed:
+
+- `read_file` - Only sandbox directory
+- `call_api` - Saves to `sandbox/downloads/`
+- `run_nmap`, `run_nuclei` - Save to `sandbox/scans/`
 
 ## Guardrails
 
-### Input guardrails
+- Input: max 5000 chars, prompt injection detection
+- Targets: blocks localhost, 127.0.0.1, metadata IPs
+- nmap: flag allowlist (`-sV`, `-sS`, `-Pn`, `-F`, `-O`)
+- call_api: http/https only, no internal URLs
+- Rate limiting: per-tool limits
 
-- blocks prompt-injection phrases such as `ignore previous instructions`
-- rejects input longer than 5000 characters
-
-### Tool guardrails
-
-- blocks `run_nmap` targets containing:
-  - `127.0.0.1`
-  - `localhost`
-  - `169.254.169.254`
-
-### Output filtering
-
-- filters responses containing:
-  - `system prompt`
-  - `internal policy`
-  - `hidden instructions`
-
-## Operational Notes
-
-- `call_tool()` iterates through every configured MCP server until one succeeds.
-- `discover_tools()` caches results for the lifetime of the process.
-- `discover_tools(force_refresh=True)` can refresh the cache when prompt rebuilds are needed.
-- The agent buffers the entire Ollama response before printing anything, even though chat is requested with `stream=True`.
-- `extract_tool_call()` now uses JSON decoding from each `{` position instead of a greedy regex search.
-- the CLI and Ollama call paths now fail gracefully instead of terminating the session on uncaught exceptions.
-
-## Current Limitations
-
-1. Tool discovery is cached for the lifetime of the process. If the agent already has a non-empty tool cache, newly added or changed tools are not picked up until the process restarts.
-2. The Ollama response is still fully buffered before display, even though upstream streaming is enabled.
-3. Only user inputs are logged today; assistant responses and tool traces are not persisted.
-4. `call_api` is a simple HTTP GET proxy and has no auth, header control, response-size limits, or explicit HTTP-status handling.
-5. `agent/prompt.py` still exists in the repo as an older prompt definition, but the active runtime path uses `BASE_SYSTEM_PROMPT` plus the dynamically built tools section.
-
-## Additional Docs
+## Documentation
 
 - Architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-- Operations and troubleshooting: [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
+- Operations: [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
